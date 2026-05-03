@@ -1,0 +1,8 @@
+[Unit]
+Description=awg-uplink geo: refresh ipset ROUTE from STAGING (daily snapshot)
+Documentation=file:///usr/local/sbin/awg-uplink-geo-ipset-rotate.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/awg-uplink-geo-ipset-rotate.sh rotate
+RemainAfterExit=no

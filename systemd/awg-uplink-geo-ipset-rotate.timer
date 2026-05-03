@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily awg-uplink geo ipset rotation (staging → route, flush staging)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
