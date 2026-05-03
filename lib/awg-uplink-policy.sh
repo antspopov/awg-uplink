@@ -24,6 +24,7 @@ usage() {
   postdown — снятие правил (состояние в $STATE_DIR)
 
 Конфиг рядом с .conf: awg-uplink-policy.env (см. lib/awg-inject-uplink-policy.sh --help)
+  Опционально: /etc/awg-uplink-split.env (или AWG_UPLINK_SPLIT_ENV) — split ingress/egress; см. lib/awg-uplink-split-wizard.sh --help
 EOF
 	exit 1
 }
@@ -41,6 +42,15 @@ ENVF="$POL_DIR/awg-uplink-policy.env"
 # shellcheck disable=1090
 set -a
 . "$ENVF"
+SPLITF=${AWG_UPLINK_SPLIT_ENV:-/etc/awg-uplink-split.env}
+if [[ ! -f $SPLITF && -z ${AWG_UPLINK_SPLIT_ENV:-} ]]; then
+	if [[ -f $POL_DIR/awg-uplink-split.env ]]; then
+		SPLITF="$POL_DIR/awg-uplink-split.env"
+	elif [[ -f /etc/amnezia/amneziawg/awg-uplink-split.env ]]; then
+		SPLITF=/etc/amnezia/amneziawg/awg-uplink-split.env
+	fi
+fi
+[[ -f $SPLITF ]] && . "$SPLITF"
 set +a
 
 IFACE_KEY=$(basename "$WGCONF" .conf)
@@ -68,6 +78,7 @@ AMNEZIA_DOCKER_NAME_PATTERN=${AMNEZIA_DOCKER_NAME_PATTERN:-^amnezia-awg}
 AMNEZIA_DOCKER_NAMES=${AMNEZIA_DOCKER_NAMES:-}
 # Список CIDR, для которых реально добавлены ip rules (для postdown)
 TO_MAIN_APPLIED=""
+RULE_SRC=""
 
 wait_for_default_route() {
 	local max=$NETWORK_BOOT_WAIT_SEC step=$NETWORK_BOOT_POLL_SEC e=0
@@ -110,6 +121,7 @@ write_state() {
 		echo "DEV=$DEV"
 		echo "GW=$GW"
 		echo "SRC=$SRC"
+		echo "RULE_SRC=$RULE_SRC"
 		echo "LINK=$LINK"
 		echo "TABLE=$TABLE"
 		echo "PRIORITY=$PRIORITY"
@@ -154,10 +166,36 @@ detect_ipv4_default() {
 		SRC=$(ip -4 -o addr show dev "$DEV" scope global 2>/dev/null | awk 'NR==1 { gsub(/\/.*/, "", $4); print $4; exit }')
 	fi
 	[[ -n $SRC ]] || die "не удалось определить IPv4 на $DEV"
-	LINK=$(ip -4 route show dev "$DEV" scope link 2>/dev/null | awk '/proto kernel/ { print $1; exit }' || true)
-	if [[ -z $LINK ]]; then
-		LINK=$(ip -4 route show dev "$DEV" scope link 2>/dev/null | awk 'NR==1 { print $1; exit }' || true)
+	LINK=$(link_for_dev "$DEV")
+}
+
+# scope link для dev (таблица uplink).
+link_for_dev() {
+	local d=$1
+	local lk
+	lk=$(ip -4 route show dev "$d" scope link 2>/dev/null | awk '/proto kernel/ { print $1; exit }' || true)
+	[[ -n $lk ]] || lk=$(ip -4 route show dev "$d" scope link 2>/dev/null | awk 'NR==1 { print $1; exit }' || true)
+	echo "$lk"
+}
+
+# Split: ingress = правило from IP → uplink; egress = физический путь и src в table 200 (см. awg-uplink-split.env).
+apply_split_routing_context() {
+	local line
+	[[ ${AWG_SPLIT_ENABLE:-0} -eq 1 && -n ${AWG_INGRESS_IPV4:-} ]] || return 1
+	[[ -n ${AWG_EGRESS_DEV:-} ]] || die "AWG_SPLIT: задайте AWG_EGRESS_DEV в $SPLITF"
+	DEV=$AWG_EGRESS_DEV
+	GW=${AWG_EGRESS_GW-}
+	if [[ -z $GW ]]; then
+		line=$(ip -4 route show default dev "$DEV" 2>/dev/null | awk '/^default / { print; exit }' || true)
+		if [[ $line =~ via[[:space:]]+([0-9.]+) ]]; then
+			GW="${BASH_REMATCH[1]}"
+		fi
 	fi
+	SRC=$AWG_INGRESS_IPV4
+	RULE_SRC=$AWG_INGRESS_IPV4
+	LINK=$(link_for_dev "$DEV")
+	[[ -n $LINK ]] || warn "AWG_SPLIT: нет scope link на $DEV — таблица uplink может быть неполной"
+	return 0
 }
 
 bridge_prefix() {
@@ -404,11 +442,24 @@ do_postup() {
 	DOCKER_BR=''
 	DOCKER_DPORT=''
 	wait_for_default_route
-	detect_ipv4_default
-	if [[ -n $GW ]]; then
-		ip route replace default via "$GW" dev "$DEV" table "$TABLE"
+	if apply_split_routing_context; then
+		:
 	else
-		ip route replace default dev "$DEV" table "$TABLE"
+		detect_ipv4_default
+		RULE_SRC=$SRC
+	fi
+	if [[ -n $GW ]]; then
+		if [[ ${AWG_SPLIT_ENABLE:-0} -eq 1 && -n ${AWG_EGRESS_IPV4:-} ]]; then
+			ip route replace default via "$GW" dev "$DEV" src "$AWG_EGRESS_IPV4" table "$TABLE"
+		else
+			ip route replace default via "$GW" dev "$DEV" table "$TABLE"
+		fi
+	else
+		if [[ ${AWG_SPLIT_ENABLE:-0} -eq 1 && -n ${AWG_EGRESS_IPV4:-} ]]; then
+			ip route replace default dev "$DEV" src "$AWG_EGRESS_IPV4" table "$TABLE"
+		else
+			ip route replace default dev "$DEV" table "$TABLE"
+		fi
 	fi
 	if [[ -n $LINK && $LINK =~ ^[0-9.]+/[0-9]+$ ]]; then
 		ip route replace "$LINK" dev "$DEV" table "$TABLE"
@@ -423,8 +474,8 @@ do_postup() {
 	fi
 	docker_setup
 	to_main_bypass_setup
-	ip rule del from "$SRC" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
-	ip rule add from "$SRC" table "$TABLE" priority "$PRIORITY"
+	ip rule del from "$RULE_SRC" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
+	ip rule add from "$RULE_SRC" table "$TABLE" priority "$PRIORITY"
 	sysctl -q "net.ipv4.conf.${DEV}.rp_filter=$RP_LOOSE"
 	write_state
 }
@@ -436,7 +487,8 @@ do_postdown() {
 	}
 	# shellcheck disable=1090
 	. "$STATE"
-	ip rule del from "$SRC" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
+	RULE_SRC=${RULE_SRC:-$SRC}
+	ip rule del from "$RULE_SRC" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
 	to_main_bypass_teardown
 	docker_teardown
 	if [[ -n ${EXTRA_CIDRS:-} ]]; then

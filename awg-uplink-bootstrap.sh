@@ -5,6 +5,8 @@
 # Нужен запущенный контейнер Amnezia в Docker; root. Подробности: --help
 set -euo pipefail
 
+SPLIT_ROUTING_WIZARD=${SPLIT_ROUTING_WIZARD:-0}
+
 # Пустой / не заданный AMNEZIA_DOCKER_NAMES = искать контейнеры по AMNEZIA_DOCKER_NAME_PATTERN (ERE).
 AMNEZIA_DOCKER_NAME_PATTERN=${AMNEZIA_DOCKER_NAME_PATTERN:-^amnezia-awg}
 AMNEZIA_APT_LIST=/etc/apt/sources.list.d/amnezia-ppa.list
@@ -57,6 +59,8 @@ usage() {
   Docker: контейнер Amnezia — по умолчанию любое имя, подходящее под \$AMNEZIA_DOCKER_NAME_PATTERN (ERE, по умолчанию ^amnezia-awg: amnezia-awg, amnezia-awg2, …).
   Если задан непустой \$AMNEZIA_DOCKER_NAMES (через пробел), проверяются только эти точные имена.
 
+  --split-routing-wizard  После inject: интерактивный мастер split-routing (ingress для клиентов / egress для исходящего трафика и unit awg-uplink-split@IFACE). См. lib/awg-uplink-split-wizard.sh --help
+
 AmneziaWG (интерфейс ${CANON_STEM}, unit awg-quick@${CANON_STEM})
   --amneziawg-from-source   Сборка amneziawg (DKMS) + amneziawg-tools из Git, без PPA.
   --amneziawg-reinstall     Переустановка amneziawg (apt --reinstall или пересборка DKMS).
@@ -68,7 +72,7 @@ MTProto (mtbuddy / mtproto.zig, только с --with-mtproto-proxy)
   --mtproto-domain HOST     tls_domain для маскировки при install (по умолчанию wb.ru).
   --mtproto-user NAME       Пользователь в [access.users] (по умолчанию user).
   --mtproto-secret HEX      32 hex; иначе генерирует mtbuddy.
-  --mtproto-public-ip ADDR  [server] public_ip; иначе авто IPv4 с uplink (не awg/wg/tun). Влияет на tg:// и на MP при IPv4.
+  --mtproto-public-ip ADDR  [server] public_ip; иначе авто: при AWG_SPLIT_ENABLE=1 — AWG_INGRESS_IPV4 из split-env, иначе IPv4 с uplink (не awg/wg/tun/amnN). Влияет на tg:// и на MP при IPv4.
   --mtproto-middle-proxy-nat-ip ADDR  [server] middle_proxy_nat_ip (только IPv4); иначе curl по default route
                             (ipify/ifconfig.me; первый URL — MTPROTO_EGRESS_IP_URL). Обычно «exit» за awg-uplink, ≠ public_ip.
   --mtproto-no-dpi          mtbuddy install --no-dpi (без nginx/nf/tcpmss).
@@ -113,6 +117,7 @@ while [[ $# -gt 0 ]]; do
 	-h | --help) usage 0 ;;
 	--amneziawg-from-source) AMNEZIAWG_FROM_SOURCE=1 ;;
 	--amneziawg-reinstall) AMNEZIAWG_REINSTALL=1 ;;
+	--split-routing-wizard) SPLIT_ROUTING_WIZARD=1 ;;
 	--with-mtproto-proxy) WITH_MTPROTO_PROXY=1 ;;
 	--mtproto-no-dpi) MTPROTO_NO_DPI=1 ;;
 	--mtproto-middle-proxy) MTPROTO_MIDDLE_PROXY=1 ;;
@@ -455,6 +460,37 @@ remove_legacy_mtproto_tunnel_artifacts() {
 	systemctl daemon-reload 2>/dev/null || true
 }
 
+# Путь к split-env — как в lib/awg-uplink-split-main.sh
+awg_uplink_split_env_path() {
+	local p=${AWG_UPLINK_SPLIT_ENV:-/etc/awg-uplink-split.env}
+	if [[ ! -f $p && -z ${AWG_UPLINK_SPLIT_ENV:-} && -f /etc/amnezia/amneziawg/awg-uplink-split.env ]]; then
+		p=/etc/amnezia/amneziawg/awg-uplink-split.env
+	fi
+	echo "$p"
+}
+
+# Ingress для MTProto public_ip / URL дашборда, только если split-routing включён в split-env.
+split_routing_ingress_ipv4_if_enabled() {
+	local f
+	f=$(awg_uplink_split_env_path)
+	[[ -f $f ]] || return 1
+	local AWG_SPLIT_ENABLE AWG_INGRESS_IPV4
+	# shellcheck disable=1090
+	set -a
+	. "$f"
+	set +a
+	[[ ${AWG_SPLIT_ENABLE:-0} -eq 1 && -n ${AWG_INGRESS_IPV4:-} ]] || return 1
+	echo "$AWG_INGRESS_IPV4"
+}
+
+# Авто public_ip / хост дашборда: при split — ingress; иначе прежний detect_mtproto_public_ipv4.
+resolve_mtproto_public_ipv4_auto() {
+	local pub
+	pub=$(split_routing_ingress_ipv4_if_enabled) || true
+	[[ -n ${pub:-} ]] && { echo "$pub"; return 0; }
+	detect_mtproto_public_ipv4
+}
+
 # IPv4 «с земли»: default-маршрут не через awg/wg/tun/… иначе первый поднятый eth/ens/enp с global scope.
 detect_mtproto_public_ipv4() {
 	local line dev ip
@@ -462,6 +498,7 @@ detect_mtproto_public_ipv4() {
 		[[ $line == default* ]] || continue
 		[[ $line =~ dev[[:space:]]+([^[:space:]]+) ]] || continue
 		dev="${BASH_REMATCH[1]}"
+		[[ $dev =~ ^amn[0-9]+$ ]] && continue
 		case "$dev" in
 		awg* | wg* | tun* | tap* | vb* | sit* | gre* | ipip* | lo | docker0) continue ;;
 		esac
@@ -517,7 +554,7 @@ mtproto_public_ip_is_rfc1918() {
 patch_mtproto_public_ip() {
 	local pub=${MTPROTO_PUBLIC_IP:-}
 	if [[ -z $pub ]]; then
-		pub=$(detect_mtproto_public_ipv4) || true
+		pub=$(resolve_mtproto_public_ipv4_auto) || true
 	fi
 	[[ -n $pub ]] || {
 		warn "Не удалось определить IPv4 для [server] public_ip в mtproto; задайте MTPROTO_PUBLIC_IP или --mtproto-public-ip"
@@ -919,7 +956,7 @@ PY
 		systemctl enable nginx 2>/dev/null || true
 		systemctl start nginx || die "systemctl start nginx не удался"
 	fi
-	up=$(detect_mtproto_public_ipv4 || true)
+	up=$(resolve_mtproto_public_ipv4_auto || true)
 	[[ -n ${up:-} ]] || up="<публичный-IPv4-сервера>"
 	SUMMARY_DASHBOARD_URL="https://${up}:${pub_port}/dashboard/"
 	SUMMARY_DASHBOARD_USER=${MTPROTO_DASHBOARD_USER:-admin}
@@ -1062,6 +1099,10 @@ main() {
 	fi
 	log "Шаг 3/4: inject uplink policy…"
 	bash -- "$INJECT" "$INPUT"
+	if [[ ${SPLIT_ROUTING_WIZARD:-0} -eq 1 ]]; then
+		log "Мастер split-routing (ingress/egress)…"
+		bash -- "$ROOTDIR/lib/awg-uplink-split-wizard.sh" || die "мастер split-routing завершился с ошибкой"
+	fi
 	systemctl daemon-reload
 	systemctl enable "awg-quick@${CANON_STEM}.service"
 	systemctl restart "awg-quick@${CANON_STEM}.service"
