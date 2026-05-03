@@ -62,8 +62,8 @@ usage() {
 
   --split-routing-wizard  После inject: интерактивный мастер split-routing (ingress для клиентов / egress для исходящего трафика и unit awg-uplink-split@IFACE). См. lib/awg-uplink-split-wizard.sh --help
   --with-geo-dns          После inject: geo-DNS (отключение systemd-resolved, dnscrypt-proxy→dnsmasq→ipset,
-                            таймер ротации ipset, nft/fwmark в таблицу uplink, PostUp/PostDown, docker --dns).
-                            См. lib/awg-uplink-geo-install.sh (списки доменов: /etc/awg-uplink-geo.domains.conf).
+                            таймер ротации ipset, nft: DNS redirect из docker-подсетей + fwmark в uplink, PostUp/PostDown).
+                            Подсети как to_main bypass (скрипт docker-subnets). Домены: /etc/awg-uplink-geo.domains.conf.
 
 AmneziaWG (интерфейс ${CANON_STEM}, unit awg-quick@${CANON_STEM})
   --amneziawg-from-source   Сборка amneziawg (DKMS) + amneziawg-tools из Git, без PPA.
@@ -1072,7 +1072,7 @@ print_bootstrap_summary() {
 	log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	log "Итог: awg-uplink — awg-quick@${CANON_STEM} активен"
 	if [[ ${WITH_GEO_DNS:-0} -eq 1 ]]; then
-		log "Geo-DNS: dnsmasq + dnscrypt-proxy, ipset awg_geo_* + таймер ротации; домены — /etc/awg-uplink-geo.domains.conf"
+		log "Geo-DNS: dnsmasq + dnscrypt-proxy, ipset + таймер; nft DNS redirect из docker CIDR; домены — /etc/awg-uplink-geo.domains.conf"
 	fi
 	if [[ ${WITH_MTPROTO_PROXY:-0} -eq 1 ]]; then
 		log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1113,7 +1113,7 @@ main() {
 		bash -- "$ROOTDIR/lib/awg-uplink-split-wizard.sh" || die "мастер split-routing завершился с ошибкой"
 	fi
 	if [[ ${WITH_GEO_DNS:-0} -eq 1 ]]; then
-		log "Geo-DNS (dnscrypt, dnsmasq, ipset, nft, docker DNS)…"
+		log "Geo-DNS (dnscrypt, dnsmasq, ipset, nft redirect/mark по docker CIDR)…"
 		bash -- "$ROOTDIR/lib/awg-uplink-geo-install.sh" || die "awg-uplink-geo-install.sh завершился с ошибкой"
 	fi
 	systemctl daemon-reload

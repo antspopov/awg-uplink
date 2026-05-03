@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # Установка geo-DNS: systemd-resolved off, dnscrypt-proxy → dnsmasq (ipset staging),
-# таймер ротации ipset, nft+ip rule (awg-uplink-geo-firewall), хуки PostUp/PostDown awg-uplink,
-# docker update --dns на шлюз bridge (контейнеры Amnezia по шаблону из awg-uplink-policy.env).
+# таймер ротации ipset, nft (DNS redirect из docker-подсетей + fwmark), хуки PostUp/PostDown awg-uplink.
+# Подсети как у to_main bypass — lib/awg-uplink-geo-docker-subnets.sh (без docker update).
 
 set -euo pipefail
 
@@ -19,6 +19,8 @@ GEO_ENV=/etc/awg-uplink-geo.env
 DOMAINS_CONF=/etc/awg-uplink-geo.domains.conf
 DNSMASQ_SNIP=/etc/dnsmasq.d/zzz-awg-uplink-geo.conf
 DNCRYPT_TOML=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
+SUBNET_SRC="$ROOTDIR/lib/awg-uplink-geo-docker-subnets.sh"
+SUBNET_DST=/usr/local/lib/awg-uplink/awg-uplink-geo-docker-subnets.sh
 ROT_SRC="$ROOTDIR/lib/awg-uplink-geo-ipset-rotate.sh"
 UNIT_ROT_SVC="$ROOTDIR/systemd/awg-uplink-geo-ipset-rotate.service"
 UNIT_ROT_TMR="$ROOTDIR/systemd/awg-uplink-geo-ipset-rotate.timer"
@@ -41,10 +43,10 @@ warn() { echo "[awg-geo-install] WARN: $*" >&2; }
 Использование: awg-uplink-geo-install.sh
 
   Устанавливает geo-DNS стек (root): пакеты, отключение systemd-resolved,
-  dnscrypt-proxy (127.0.0.1:5354), dnsmasq (53 на 127.0.0.1 + docker0),
+  dnscrypt-proxy (127.0.0.1:5354), dnsmasq (53 на 127.0.0.1 + адреса docker0/br-*/amn*),
   /etc/awg-uplink-geo.env, домены → /etc/awg-uplink-geo.domains.conf,
-  ipset + таймер ротации, nft/fwmark, PostUp/PostDown в awg-uplink.conf,
-  docker update --dns <gateway bridge> для контейнеров по AMNEZIA_DOCKER_NAME_PATTERN.
+  ipset + таймер ротации, nft (prerouting DNS redirect из docker CIDR + mark), PostUp/PostDown.
+  Подсети: /usr/local/lib/awg-uplink/awg-uplink-geo-docker-subnets.sh (как detect_to_main в policy).
 
   Переменные: AWG_GEO_WG_CONF, AWG_GEO_POLICY_ENV (пути к .conf и policy.env).
 EOF
@@ -158,19 +160,31 @@ EOF
 	log "создан $DOMAINS_CONF — добавьте ipset=/домен/awg_geo_staging"
 }
 
+docker_bridge_listen_addrs() {
+	ip -4 -o addr show scope global 2>/dev/null | awk '
+		$2 ~ /^(docker0|br-[0-9a-f]+|amn[0-9]+)(@|$)/ {
+			gsub(/@.*/, "", $2)
+			gsub(/\/.*/, "", $4)
+			if ($4 != "") print $4
+		}' | sort -u
+}
+
 write_dnsmasq_snippet() {
-	local docker0_ip
-	docker0_ip=$(ip -4 -o addr show docker0 2>/dev/null | awk '$3=="inet" {gsub(/\/.*/,"",$4); print $4; exit}')
+	local a n=0
 	{
 		echo "# awg-uplink-geo (перегенерация: снова запустите lib/awg-uplink-geo-install.sh)"
 		echo "bind-interfaces"
 		echo "except-interface=lo"
 		echo "listen-address=127.0.0.1"
-		if [[ -n ${docker0_ip:-} ]]; then
-			echo "listen-address=$docker0_ip"
-			log "dnsmasq: listen docker0=$docker0_ip"
+		while IFS= read -r a; do
+			[[ -n $a ]] || continue
+			echo "listen-address=$a"
+			n=$((n + 1))
+		done < <(docker_bridge_listen_addrs)
+		if [[ $n -gt 0 ]]; then
+			log "dnsmasq: listen на $n адрес(ов) docker bridge"
 		else
-			warn "нет IPv4 на docker0 — только 127.0.0.1; контейнеры без маршрута к нему не увидят DNS"
+			warn "нет IPv4 на docker0/br-*/amn* — только 127.0.0.1 (DNS с контейнеров — через nft redirect на lo)"
 		fi
 		echo "no-resolv"
 		echo "no-poll"
@@ -199,40 +213,14 @@ install_packages() {
 }
 
 install_bins_and_units() {
+	install -d /usr/local/lib/awg-uplink
+	install -m755 "$SUBNET_SRC" "$SUBNET_DST"
 	install -m755 "$ROT_SRC" "$ROT_DST"
 	install -m644 "$UNIT_ROT_SVC" /etc/systemd/system/awg-uplink-geo-ipset-rotate.service
 	install -m644 "$UNIT_ROT_TMR" /etc/systemd/system/awg-uplink-geo-ipset-rotate.timer
 	install -m755 "$FW_SRC" "$FW_DST"
 	install -m755 "$POSTUP_SRC" "$POSTUP_DST"
 	install -m755 "$POSTDOWN_SRC" "$POSTDOWN_DST"
-}
-
-docker_set_dns_to_bridge_gateway() {
-	command -v docker >/dev/null 2>&1 || {
-		warn "docker не в PATH — пропуск docker update --dns"
-		return 0
-	}
-	local gw pat
-	gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null | tr -d '\r\n' || true)
-	[[ -n $gw ]] || gw=172.17.0.1
-	pat='^amnezia-awg'
-	if [[ -f $POLICY_ENV ]]; then
-		# shellcheck disable=1090
-		set -a
-		. "$POLICY_ENV"
-		set +a
-		pat=${AMNEZIA_DOCKER_NAME_PATTERN:-^amnezia-awg}
-	fi
-	local n
-	while IFS= read -r n; do
-		[[ -n $n ]] || continue
-		[[ $n =~ $pat ]] || continue
-		if docker update --dns "$gw" "$n" 2>/dev/null; then
-			log "docker update --dns $gw $n"
-		else
-			warn "docker update --dns $gw $n не удался"
-		fi
-	done < <(docker ps --format '{{.Names}}' 2>/dev/null || true)
 }
 
 main() {
@@ -253,8 +241,7 @@ main() {
 	systemctl restart dnscrypt-proxy.service 2>/dev/null || systemctl restart dnscrypt-proxy.socket 2>/dev/null || true
 	systemctl restart dnsmasq.service || die "dnsmasq не стартует — journalctl -u dnsmasq"
 	merge_geo_hooks
-	docker_set_dns_to_bridge_gateway
-	log "готово. Проверка: ss -lunp | grep -E ':53|:5354'; dig @127.0.0.1 example.com; $ROT_DST status"
+	log "готово. Проверка: ss -lunp | grep -E ':53|:5354'; dig @127.0.0.1 example.com; $ROT_DST status; AWG_GEO_POLICY_ENV=$POLICY_ENV $SUBNET_DST"
 }
 
 main "$@"

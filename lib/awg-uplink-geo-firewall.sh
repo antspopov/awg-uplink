@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# nft: маркировка трафика к dst ∈ staging ∪ route → fwmark → table uplink (как awg-uplink-policy).
-# Вызывается PostUp/PostDown awg-quick (см. awg-uplink-geo-install.sh).
+# nft: перехват DNS (udp/tcp 53) из подсетей Docker → localhost:dnsmasq;
+# маркировка forward/output к dst ∈ staging ∪ route → fwmark → table uplink (как awg-uplink-policy).
+# Подсети: lib/awg-uplink-geo-docker-subnets.sh (логика как to_main bypass).
 
 set -euo pipefail
 
 POLICY_ENV=${AWG_GEO_POLICY_ENV:-/etc/amnezia/amneziawg/awg-uplink-policy.env}
 GEO_ENV=${AWG_GEO_ENV:-/etc/awg-uplink-geo.env}
 ROT=/usr/local/sbin/awg-uplink-geo-ipset-rotate.sh
+SUBNET_SH=${AWG_GEO_DOCKER_SUBNETS:-/usr/local/lib/awg-uplink/awg-uplink-geo-docker-subnets.sh}
 NFT_TABLE=awg_uplink_geo
 
 die() { echo "[awg-geo-fw] ERROR: $*" >&2; exit 1; }
 log() { echo "[awg-geo-fw] $*"; }
+warn() { echo "[awg-geo-fw] WARN: $*" >&2; }
 
 load_policy() {
 	[[ -f $POLICY_ENV ]] || die "нет $POLICY_ENV"
@@ -21,7 +24,6 @@ load_policy() {
 	. "$POLICY_ENV"
 	set +a
 	TABLE=${TABLE:-200}
-	DOCKER_BR=${DOCKER_MARK_IN:-docker0}
 }
 
 load_geo() {
@@ -36,6 +38,27 @@ load_geo() {
 	GEO_HEX=${AWG_GEO_FWMARK_HEX:-0x7783}
 	GEO_PRIO=${AWG_GEO_RULE_PRIO:-83}
 	NFT_TABLE=${AWG_GEO_NFT_TABLE:-awg_uplink_geo}
+}
+
+docker_bridge_ifaces() {
+	ip -4 route show table main 2>/dev/null | awk '$2 == "dev" && ($3 ~ /^docker0$/ || $3 ~ /^br-/ || $3 ~ /^amn[0-9]+$/) { print $3 }' | sort -u
+}
+
+route_localnet_set() {
+	local v=$1 dev
+	while IFS= read -r dev; do
+		[[ -n $dev ]] || continue
+		[[ -e "/sys/class/net/$dev" ]] || continue
+		sysctl -q "net.ipv4.conf.${dev}.route_localnet=$v" 2>/dev/null || true
+	done < <(docker_bridge_ifaces)
+}
+
+collect_docker_cidrs() {
+	local out=""
+	if [[ -x $SUBNET_SH ]]; then
+		out=$(AWG_GEO_POLICY_ENV="$POLICY_ENV" "$SUBNET_SH" 2>/dev/null || true)
+	fi
+	echo -n "$out"
 }
 
 cmd_down() {
@@ -59,7 +82,8 @@ cmd_down() {
 	fi
 	ip rule del fwmark "$dec" table "$t" priority "$prio" 2>/dev/null || true
 	nft delete table ip "$tab" 2>/dev/null || true
-	log "снято: table ip $tab, ip rule fwmark $dec → table $t"
+	route_localnet_set 0
+	log "снято: table ip $tab, ip rule fwmark $dec → table $t, route_localnet=0 на docker bridge"
 }
 
 cmd_up() {
@@ -80,12 +104,36 @@ cmd_up() {
 
 	cmd_down
 
+	local cidrs elem c
+	cidrs=$(collect_docker_cidrs)
+	elem=""
+	for c in $cidrs; do
+		[[ -n $c ]] || continue
+		[[ -n $elem ]] && elem+=", "
+		elem+="$c"
+	done
+
 	nft add table ip "$NFT_TABLE"
-	# forward: из Docker (и др. bridge) к dst в geo — в uplink
-	nft add chain ip "$NFT_TABLE" forward '{ type filter hook forward priority -25; policy accept; }'
-	nft add rule ip "$NFT_TABLE" forward iifname "$DOCKER_BR" ip daddr @"$STAGING" meta mark set "$GEO_HEX"
-	nft add rule ip "$NFT_TABLE" forward iifname "$DOCKER_BR" ip daddr @"$ROUTE" meta mark set "$GEO_HEX"
-	# output: маркировка до FIB (route hook; при ошибке — filter output на старых nft)
+
+	if [[ -n $elem ]]; then
+		nft add set ip "$NFT_TABLE" docker_nets "{ type ipv4_addr; flags interval; elements = { $elem }; }"
+		nft add chain ip "$NFT_TABLE" nat_pre '{ type nat hook prerouting priority -150; policy accept; }'
+		nft add rule ip "$NFT_TABLE" nat_pre ip saddr @docker_nets udp dport 53 redirect to :53
+		nft add rule ip "$NFT_TABLE" nat_pre ip saddr @docker_nets tcp dport 53 redirect to :53
+		log "nat prerouting: DNS из docker-подсетей → localhost:53 ($cidrs)"
+		route_localnet_set 1
+	else
+		warn "подсети Docker пусты ($SUBNET_SH) — нет nat DNS redirect; проверьте docker и awg-uplink-policy.env"
+	fi
+
+	if [[ -n $elem ]]; then
+		nft add chain ip "$NFT_TABLE" forward '{ type filter hook forward priority -25; policy accept; }'
+		nft add rule ip "$NFT_TABLE" forward ip saddr @docker_nets ip daddr @"$STAGING" meta mark set "$GEO_HEX"
+		nft add rule ip "$NFT_TABLE" forward ip saddr @docker_nets ip daddr @"$ROUTE" meta mark set "$GEO_HEX"
+	else
+		warn "нет docker CIDR — цепочка forward geo-mark не создаётся (только output на хосте)"
+	fi
+
 	if ! nft add chain ip "$NFT_TABLE" out_rt '{ type route hook output priority -150; policy accept; }' 2>/dev/null; then
 		nft add chain ip "$NFT_TABLE" out_rt '{ type filter hook output priority -25; policy accept; }'
 	fi
@@ -94,14 +142,14 @@ cmd_up() {
 
 	ip rule del fwmark "$GEO_DEC" table "$TABLE" priority "$GEO_PRIO" 2>/dev/null || true
 	ip rule add fwmark "$GEO_DEC" table "$TABLE" priority "$GEO_PRIO"
-	log "nft ip $NFT_TABLE: mark $GEO_HEX → table $TABLE prio $GEO_PRIO (sets $STAGING + $ROUTE, iif $DOCKER_BR)"
+	log "nft ip $NFT_TABLE: mark $GEO_HEX → table $TABLE prio $GEO_PRIO (geo ipset $STAGING + $ROUTE)"
 }
 
 usage() {
 	cat >&2 <<EOF
 Использование: $0 up | down
 
-  Переменные: AWG_GEO_ENV, AWG_GEO_POLICY_ENV, AWG_GEO_NFT_TABLE
+  Переменные: AWG_GEO_ENV, AWG_GEO_POLICY_ENV, AWG_GEO_DOCKER_SUBNETS (скрипт списка CIDR), AWG_GEO_NFT_TABLE
 EOF
 	exit 1
 }
