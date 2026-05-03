@@ -52,6 +52,7 @@ awg-uplink-policy.env (ручная правка при необходимост
   AMNEZIA_DOCKER_NAME_PATTERN — ERE имени контейнера (по умолчанию ^amnezia-awg: amnezia-awg, amnezia-awg2, …)
   AMNEZIA_DOCKER_NAMES — если непусто: только эти имена (пробелом), шаблон не используется
   Split-routing: /etc/awg-uplink-split.env (мастер lib/awg-uplink-split-wizard.sh или bootstrap --split-routing-wizard; опционально AWG_UPLINK_SPLIT_ENV в awg-uplink-policy.env)
+  Geo-DNS (опционально): bootstrap --with-geo-dns или lib/awg-uplink-geo-install.sh; DOCKER_MARK_IN для nft geo = bridge Amnezia (часто br-…, не только docker0)
   TO_MAIN_CIDRS — вручную подменяет авто-список bypass в main
   AWG_DEFAULT_IFACE — явный интерфейс default route
   NETWORK_BOOT_WAIT_SEC / NETWORK_BOOT_POLL_SEC, DOCKER_BOOT_WAIT_SEC / DOCKER_BOOT_POLL_SEC

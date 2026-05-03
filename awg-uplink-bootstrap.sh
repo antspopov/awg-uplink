@@ -6,6 +6,7 @@
 set -euo pipefail
 
 SPLIT_ROUTING_WIZARD=${SPLIT_ROUTING_WIZARD:-0}
+WITH_GEO_DNS=${WITH_GEO_DNS:-0}
 
 # Пустой / не заданный AMNEZIA_DOCKER_NAMES = искать контейнеры по AMNEZIA_DOCKER_NAME_PATTERN (ERE).
 AMNEZIA_DOCKER_NAME_PATTERN=${AMNEZIA_DOCKER_NAME_PATTERN:-^amnezia-awg}
@@ -60,6 +61,9 @@ usage() {
   Если задан непустой \$AMNEZIA_DOCKER_NAMES (через пробел), проверяются только эти точные имена.
 
   --split-routing-wizard  После inject: интерактивный мастер split-routing (ingress для клиентов / egress для исходящего трафика и unit awg-uplink-split@IFACE). См. lib/awg-uplink-split-wizard.sh --help
+  --with-geo-dns          После inject: geo-DNS (отключение systemd-resolved, dnscrypt-proxy→dnsmasq→ipset,
+                            таймер ротации ipset, nft/fwmark в таблицу uplink, PostUp/PostDown, docker --dns).
+                            См. lib/awg-uplink-geo-install.sh (списки доменов: /etc/awg-uplink-geo.domains.conf).
 
 AmneziaWG (интерфейс ${CANON_STEM}, unit awg-quick@${CANON_STEM})
   --amneziawg-from-source   Сборка amneziawg (DKMS) + amneziawg-tools из Git, без PPA.
@@ -97,6 +101,7 @@ MTProto (mtbuddy / mtproto.zig, только с --with-mtproto-proxy)
   Дашборд:   MTPROTO_DASHBOARD_NGINX=0, MTPROTO_DASHBOARD_NGINX_MASK_PORT, MTPROTO_DASHBOARD_NGINX_SITE,
               MTPROTO_DASHBOARD_USER, MTPROTO_DASHBOARD_PASSWORD, MTPROTO_DASHBOARD_MONITOR_ADDR, MTPROTO_DASHBOARD_MONITOR_PORT
   Docker:    AMNEZIA_DOCKER_NAME_PATTERN (ERE имени контейнера), AMNEZIA_DOCKER_NAMES — явный список имён (перекрывает шаблон); см. lib/awg-inject-uplink-policy.sh --help
+  Geo-DNS:   WITH_GEO_DNS=1 или --with-geo-dns (после inject, до перезапуска awg-quick)
 
 Шаги скрипта
   1) Проверка Docker Amnezia
@@ -118,6 +123,7 @@ while [[ $# -gt 0 ]]; do
 	--amneziawg-from-source) AMNEZIAWG_FROM_SOURCE=1 ;;
 	--amneziawg-reinstall) AMNEZIAWG_REINSTALL=1 ;;
 	--split-routing-wizard) SPLIT_ROUTING_WIZARD=1 ;;
+	--with-geo-dns) WITH_GEO_DNS=1 ;;
 	--with-mtproto-proxy) WITH_MTPROTO_PROXY=1 ;;
 	--mtproto-no-dpi) MTPROTO_NO_DPI=1 ;;
 	--mtproto-middle-proxy) MTPROTO_MIDDLE_PROXY=1 ;;
@@ -1065,6 +1071,9 @@ print_bootstrap_summary() {
 	log ""
 	log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	log "Итог: awg-uplink — awg-quick@${CANON_STEM} активен"
+	if [[ ${WITH_GEO_DNS:-0} -eq 1 ]]; then
+		log "Geo-DNS: dnsmasq + dnscrypt-proxy, ipset awg_geo_* + таймер ротации; домены — /etc/awg-uplink-geo.domains.conf"
+	fi
 	if [[ ${WITH_MTPROTO_PROXY:-0} -eq 1 ]]; then
 		log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 		log "MTProto — ссылки для Telegram (tg:// и t.me):"
@@ -1102,6 +1111,10 @@ main() {
 	if [[ ${SPLIT_ROUTING_WIZARD:-0} -eq 1 ]]; then
 		log "Мастер split-routing (ingress/egress)…"
 		bash -- "$ROOTDIR/lib/awg-uplink-split-wizard.sh" || die "мастер split-routing завершился с ошибкой"
+	fi
+	if [[ ${WITH_GEO_DNS:-0} -eq 1 ]]; then
+		log "Geo-DNS (dnscrypt, dnsmasq, ipset, nft, docker DNS)…"
+		bash -- "$ROOTDIR/lib/awg-uplink-geo-install.sh" || die "awg-uplink-geo-install.sh завершился с ошибкой"
 	fi
 	systemctl daemon-reload
 	systemctl enable "awg-quick@${CANON_STEM}.service"
