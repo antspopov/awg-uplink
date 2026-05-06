@@ -3,6 +3,14 @@ set -euo pipefail
 
 CFG_ENV="${AWG_WEBUI_IFACE_ENV:-/etc/awg-uplink-webui/interfaces.env}"
 STATE_FILE="/run/awg-webui-ifaces.state"
+INGRESS_NAT_COMMENT="awg-webui-tunnel-ingress-docker-snat"
+# См. lib/awg-uplink-policy.sh: nft mangle после wg-quick, fwmark для ответов Docker-VPN через uplink-table.
+NFT_PUBUDP_TABLE=${NFT_PUBUDP_TABLE:-awg_webui_pubudp}
+NFT_PUBUDP_CHAIN=${NFT_PUBUDP_CHAIN:-prerouting}
+DOCKER_MARK_TUNNEL_PRIO=${DOCKER_MARK_TUNNEL_PRIO:-71}
+DOCKER_SRC_PRIO_AFTER_MARK=${DOCKER_SRC_PRIO_AFTER_MARK:-73}
+DOCKER_FWMARK_DEC=${DOCKER_FWMARK_DEC:-30596}
+DOCKER_FWMARK_HEX=${DOCKER_FWMARK_HEX:-0x7784}
 
 log() { echo "[awg-webui-iface] $*"; }
 
@@ -16,6 +24,22 @@ link_for_dev() {
   lk=$(ip -4 route show dev "$d" scope link 2>/dev/null | awk '/proto kernel/ { print $1; exit }' || true)
   [[ -n $lk ]] || lk=$(ip -4 route show dev "$d" scope link 2>/dev/null | awk 'NR==1 { print $1; exit }' || true)
   echo "$lk"
+}
+
+# В main могут остаться несколько default (awg-uplink metric 0 и eth metric 100); тогда «ещё» побеждает туннель.
+flush_default_via_dev() {
+  local d=$1
+  [[ -n "${d:-}" ]] || return 0
+  while ip -4 route del default dev "$d" 2>/dev/null; do true; done
+}
+
+# После apply store: при остановке сервиса восстанавливать прямой egress, а не default с awg-uplink.
+canonical_egress_default_line() {
+  if [[ -n "${EGRESS_GW:-}" ]]; then
+    echo "default via ${EGRESS_GW} dev ${EGRESS_DEV} src ${EGRESS_IP} metric ${EGRESS_METRIC:-100}"
+  else
+    echo "default dev ${EGRESS_DEV} src ${EGRESS_IP} metric ${EGRESS_METRIC:-100}"
+  fi
 }
 
 first_ipv4_for_dev() {
@@ -111,31 +135,156 @@ detect_docker_bridge_subnet_lines() {
   done < <(ip -4 route show table main 2>/dev/null | awk '$2=="dev" { print $1, $3 }')
 }
 
-# Tunnel mode before rule \"from all lookup 203\": traffic sourced from Docker bridge subnets must use uplink table
-# (default via eth0), not the catch-all tunnel table. Also copy link routes into uplink table so intra-bridge still works.
+bridge_prefix() {
+  local br="$1" ip
+  ip=$(ip -4 -o addr show "$br" 2>/dev/null | awk 'NR==1 { gsub(/\/.*/, "", $4); print $4; exit }') || true
+  [[ -n $ip ]] || return 1
+  local a b c
+  IFS=. read -r a b c _ <<<"$ip"
+  printf '%s.%s.%s.' "$a" "$b" "$c"
+}
+
+detect_docker_br_iface() {
+  local line br i
+  while read -r line; do
+    [[ $line == *"-A DOCKER"* ]] || continue
+    [[ $line == *"-p udp"* ]] || continue
+    [[ $line == *"DNAT"* ]] || continue
+    read -r -a toks <<<"$line"
+    for ((i = 0; i < ${#toks[@]} - 2; i++)); do
+      if [[ ${toks[i]} == '!' && ${toks[i + 1]} == '-i' ]]; then
+        br=${toks[i + 2]}
+        if [[ -n $br ]] && ip link show "$br" &>/dev/null; then
+          echo "$br"
+          return 0
+        fi
+      fi
+    done
+  done < <(iptables-save -t nat 2>/dev/null || true)
+  echo amn0
+}
+
+detect_dport_nat() {
+  local br_if="$1" pfx d t
+  pfx=$(bridge_prefix "$br_if") || return 1
+  while read -r line; do
+    [[ $line == *"-A DOCKER"* ]] || continue
+    [[ $line == *"-p udp"* ]] || continue
+    [[ $line == *"DNAT"* ]] || continue
+    [[ $line == *"--dport"* ]] || continue
+    d=''
+    t=''
+    read -r -a toks <<<"$line"
+    local i
+    for ((i = 0; i < ${#toks[@]}; i++)); do
+      if [[ ${toks[i]} == '--dport' ]]; then
+        d=${toks[i + 1]}
+      fi
+      if [[ ${toks[i]} == 'to-destination' ]]; then
+        t=${toks[i + 1]}
+        t=${t%%:*}
+      fi
+    done
+    [[ -n $d && -n $t ]] || continue
+    if [[ $t == "$pfx"* ]]; then
+      echo "$d"
+      return 0
+    fi
+  done < <(iptables-save -t nat 2>/dev/null || true)
+  return 1
+}
+
+detect_dport_docker() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local line hostp
+  while read -r line; do
+    hostp=$(sed -n 's/.*0\.0\.0\.0:\([0-9][0-9]*\)->[0-9][0-9]*\/udp.*/\1/p' <<<"$line")
+    [[ -n $hostp ]] && echo "$hostp" && return 0
+  done < <(docker ps --no-trunc --format '{{.Ports}}' 2>/dev/null || true)
+  return 1
+}
+
+wait_for_docker_udp_port() {
+  local br=$1 max=${DOCKER_BOOT_WAIT_SEC:-120} step=${DOCKER_BOOT_POLL_SEC:-2} e=0 d
+  while [[ $e -lt $max ]]; do
+    d=$(detect_dport_nat "$br" || true)
+    [[ -n $d ]] && {
+      echo "$d"
+      return 0
+    }
+    d=$(detect_dport_docker || true)
+    [[ -n $d ]] && {
+      echo "$d"
+      return 0
+    }
+    [[ -n "${DOCKER_FORCE_PORT:-}" ]] && {
+      echo "$DOCKER_FORCE_PORT"
+      return 0
+    }
+    sleep "$step"
+    e=$((e + step))
+  done
+  return 1
+}
+
+nft_pubudp_teardown() {
+  command -v nft >/dev/null 2>&1 || return 0
+  nft delete table ip "$NFT_PUBUDP_TABLE" 2>/dev/null || true
+}
+
+nft_pubudp_setup() {
+  local br=$1 port=$2 mark_hex=$3
+  command -v nft >/dev/null 2>&1 || {
+    log "nft not installed; omit docker udp mark (answers may mis-route in tunnel)"
+    return 1
+  }
+  nft delete table ip "$NFT_PUBUDP_TABLE" 2>/dev/null || true
+  nft add table ip "$NFT_PUBUDP_TABLE"
+  nft add chain ip "$NFT_PUBUDP_TABLE" "$NFT_PUBUDP_CHAIN" \
+    '{ type filter hook prerouting priority mangle + 5; policy accept; }'
+  nft add rule ip "$NFT_PUBUDP_TABLE" "$NFT_PUBUDP_CHAIN" \
+    iifname "$br" udp sport "$port" meta mark set "$mark_hex" comment "awg-webui-dockerudp"
+}
+
+# fwmark → uplink table must be before \"from <docker CIDR>\" rules (порядок как в awg-uplink-policy.sh).
+setup_docker_udp_fwmark_tunnel() {
+  local uplink_tab=$1 mark_dec=$2 prio=$3
+  [[ -n "${DOCKER_MARK_BR:-}" && -n "${DOCKER_MARK_DPORT:-}" ]] || return 0
+  ip rule del fwmark "$mark_dec" table "$uplink_tab" priority "$prio" 2>/dev/null || true
+  ip rule add fwmark "$mark_dec" table "$uplink_tab" priority "$prio"
+}
+
+# Tunnel mode:
+# - Connected routes в таблицу egress (202) для fwmark→202 (ответы с published UDP WG).
+# - Те же connected routes в tun table (203) чтобы DNAT forward (src=клиент, dst=контейнер) при lookup 203 доходил до bridge.
+# - ip rule from <cidr> → policy_tab: в туннельном режиме это TUN_TABLE (203), default = awg-uplink (интернет VPN-клиентов).
+#   Исключение: пакеты с nft mark (udp sport listen) идут раньше по prio в table 202 — ответы наружу без туннеля.
 setup_docker_bridge_source_uplink() {
-  local uplink_tab=$1 prio_start=$2 egress_dev=$3 ingress_dev=$4
+  local route_tab=$1 prio_start=$2 egress_dev=$3 ingress_dev=$4 extra_route_tab=${5:-} policy_tab=${6:-}
   local prio=$prio_start cidr brdev
   DOCKER_SRC_CIDRS_ORDERED=""
   DOCKER_SRC_PRIO_START=$prio_start
+  [[ -n "${policy_tab:-}" ]] || policy_tab="$route_tab"
   while IFS=$'\t' read -r cidr brdev; do
     [[ -n "${cidr:-}" && -n "${brdev:-}" ]] || continue
-    ip -4 route replace "$cidr" dev "$brdev" table "$uplink_tab"
-    ip rule del from "$cidr" table "$uplink_tab" priority "$prio" 2>/dev/null || true
-    ip rule add from "$cidr" table "$uplink_tab" priority "$prio"
+    ip -4 route replace "$cidr" dev "$brdev" table "$route_tab"
+    [[ -n "${extra_route_tab:-}" ]] && ip -4 route replace "$cidr" dev "$brdev" table "$extra_route_tab"
+    ip rule del from "$cidr" table "$policy_tab" priority "$prio" 2>/dev/null || true
+    ip rule add from "$cidr" table "$policy_tab" priority "$prio"
     DOCKER_SRC_CIDRS_ORDERED="${DOCKER_SRC_CIDRS_ORDERED} ${cidr}"
     prio=$((prio + 1))
   done < <(detect_docker_bridge_subnet_lines "$egress_dev" "${ingress_dev:-$egress_dev}")
 }
 
 teardown_docker_bridge_source_uplink() {
-  local uplink_tab=$1 prio_start=$2 cidrs="$3"
+  local route_tab=$1 policy_tab=$2 prio_start=$3 cidrs="$4" extra_route_tab=${5:-}
   [[ -z "${cidrs:-}" ]] && return 0
   local prio=$prio_start cidr
   for cidr in $cidrs; do
     [[ -n "${cidr:-}" ]] || continue
-    ip rule del from "$cidr" table "$uplink_tab" priority "$prio" 2>/dev/null || true
-    ip -4 route del "$cidr" table "$uplink_tab" 2>/dev/null || true
+    ip rule del from "$cidr" table "$policy_tab" priority "$prio" 2>/dev/null || true
+    ip -4 route del "$cidr" table "$route_tab" 2>/dev/null || true
+    [[ -n "${extra_route_tab:-}" ]] && ip -4 route del "$cidr" table "$extra_route_tab" 2>/dev/null || true
     prio=$((prio + 1))
   done
 }
@@ -169,6 +318,32 @@ teardown_to_main_bypass() {
   done
 }
 
+# Ответы на published UDP WG: nft mark → lookup 202 → MASQUERADE с egress/ingress.
+# Остальной трафик с bridge: from cidr → lookup 203 (туннель). SNAT по ctdst для split ingress см. ниже.
+setup_ingress_docker_snat() {
+  local ing=$1 cidrs=$2 c
+  [[ -n "$ing" && -n "$cidrs" ]] || return 0
+  command -v iptables >/dev/null 2>&1 || {
+    log "iptables not found; skip ingress docker SNAT"
+    return 0
+  }
+  for c in $cidrs; do
+    [[ -n "$c" ]] || continue
+    iptables -t nat -C POSTROUTING -m conntrack --ctorigdst "${ing}/32" -s "$c" ! -d "$c" -j SNAT --to-source "$ing" -m comment --comment "$INGRESS_NAT_COMMENT" 2>/dev/null && continue
+    iptables -t nat -I POSTROUTING 1 -m conntrack --ctorigdst "${ing}/32" -s "$c" ! -d "$c" -j SNAT --to-source "$ing" -m comment --comment "$INGRESS_NAT_COMMENT" 2>/dev/null || true
+  done
+}
+
+teardown_ingress_docker_snat() {
+  local ing=$1 cidrs=$2 c
+  [[ -n "$ing" && -n "$cidrs" ]] || return 0
+  command -v iptables >/dev/null 2>&1 || return 0
+  for c in $cidrs; do
+    [[ -n "$c" ]] || continue
+    while iptables -t nat -D POSTROUTING -m conntrack --ctorigdst "${ing}/32" -s "$c" ! -d "$c" -j SNAT --to-source "$ing" -m comment --comment "$INGRESS_NAT_COMMENT" 2>/dev/null; do true; done
+  done
+}
+
 save_state() {
   local old_default=$1
   local tmp="${STATE_FILE}.tmp.$$"
@@ -196,6 +371,11 @@ save_state() {
     printf 'RP_RESTORE_EGRESS_VAL=%q\n' "${RP_RESTORE_EGRESS_VAL:-}"
     printf 'RP_RESTORE_INGRESS_VAL=%q\n' "${RP_RESTORE_INGRESS_VAL:-}"
     printf 'RP_INGRESS_RESTORE_DEV=%q\n' "${RP_INGRESS_RESTORE_DEV:-}"
+    printf 'INGRESS_DOCKER_SNAT_CIDRS=%q\n' "${INGRESS_DOCKER_SNAT_CIDRS:-}"
+    printf 'DOCKER_TUNNEL_MARK_DEC=%q\n' "${DOCKER_TUNNEL_MARK_DEC:-}"
+    printf 'DOCKER_TUNNEL_MARK_PRIO=%q\n' "${DOCKER_TUNNEL_MARK_PRIO:-}"
+    printf 'DOCKER_TUNNEL_NFT_ACTIVE=%q\n' "${DOCKER_TUNNEL_NFT_ACTIVE:-0}"
+    printf 'DOCKER_POLICY_RULE_TABLE=%q\n' "${DOCKER_POLICY_RULE_TABLE:-}"
   } >"$tmp"
   mv -f -- "$tmp" "$STATE_FILE"
 }
@@ -218,8 +398,18 @@ remove_rules() {
   local bypass_prio_base="${BYPASS_PRIO_BASE:-60}"
   local dock_cidrs="${DOCKER_SRC_CIDRS_ORDERED:-}"
   local dock_prio="${DOCKER_SRC_PRIO_START:-72}"
+  local docker_policy_tab="${DOCKER_POLICY_RULE_TABLE:-$etab}"
+  local ing_snat_cidrs="${INGRESS_DOCKER_SNAT_CIDRS:-}"
+  local tun_mark_prio="${DOCKER_TUNNEL_MARK_PRIO:-}"
+  local tun_mark_dec="${DOCKER_TUNNEL_MARK_DEC:-}"
+  local tun_nft="${DOCKER_TUNNEL_NFT_ACTIVE:-0}"
   rp_filter_restore_saved "$edev" "${RP_RESTORE_EGRESS_VAL:-}" "${RP_INGRESS_RESTORE_DEV:-}" "${RP_RESTORE_INGRESS_VAL:-}"
-  teardown_docker_bridge_source_uplink "$etab" "$dock_prio" "$dock_cidrs"
+  if [[ "${tun_nft}" == "1" && -n "${tun_mark_prio}" && -n "${tun_mark_dec}" ]]; then
+    ip rule del fwmark "$tun_mark_dec" table "${EGRESS_TABLE:-202}" priority "$tun_mark_prio" 2>/dev/null || true
+  fi
+  nft_pubudp_teardown
+  teardown_ingress_docker_snat "${INGRESS_IP:-}" "$ing_snat_cidrs"
+  teardown_docker_bridge_source_uplink "$etab" "$docker_policy_tab" "$dock_prio" "$dock_cidrs" "$ttab"
   [[ -n $idev ]] && ip rule del from "$idev/32" table "$itab" priority "$iprio" 2>/dev/null || true
   [[ -n $eip ]] && ip rule del from "$eip/32" table "$etab" priority "$eprio" 2>/dev/null || true
   teardown_to_main_bypass "$bypass_srcs" "$bypass_cidrs" "$bypass_prio_base"
@@ -246,6 +436,7 @@ restore_default() {
   # shellcheck disable=SC1090
   . "$STATE_FILE"
   [[ -n ${OLD_DEFAULT:-} ]] || return 0
+  flush_default_via_dev awg-uplink
   # shellcheck disable=SC2086
   ip -4 route replace $OLD_DEFAULT 2>/dev/null || true
 }
@@ -263,8 +454,7 @@ apply_cfg() {
   local TUN_TABLE=203
   local TUN_RULE_PRIO=90
 
-  local old_default
-  old_default=$(ip -4 route show default 2>/dev/null | awk 'NR==1 { print; exit }' || true)
+  local old_default=""
   # Clear defaults on egress dev to avoid duplicated default routes.
   while ip -4 route del default dev "$EGRESS_DEV" 2>/dev/null; do true; done
 
@@ -276,6 +466,8 @@ apply_cfg() {
   BYPASS_CIDRS=""
   BYPASS_SRCS=""
   BYPASS_PRIO_BASE=60
+  INGRESS_DOCKER_SNAT_CIDRS=""
+  DOCKER_POLICY_RULE_TABLE=""
 
   if [[ "$ROUTE_MODE" == "tunnel" ]]; then
     # Bootstrapping / fresh install: apply egress+ingress split even if tunnel is not ready yet.
@@ -334,13 +526,38 @@ apply_cfg() {
       ip -4 route replace default dev awg-uplink table "$TUN_TABLE"
     fi
     [[ -n $elink ]] && ip -4 route replace "$elink" dev "$EGRESS_DEV" table "$TUN_TABLE"
-    # Docker / bridge: forwarded traffic uses private src before SNAT → must not hit catch-all tunnel rule (prio 90).
+    # Docker / bridge: как awg-uplink-policy.sh — nft mark + fwmark правило ПЕРЕД from <CIDR> (иначе mark не влияет).
+    DOCKER_TUNNEL_MARK_DEC=""
+    DOCKER_TUNNEL_MARK_PRIO=""
+    DOCKER_TUNNEL_NFT_ACTIVE=0
+    DOCKER_MARK_BR="${DOCKER_MARK_IN:-}"
+    [[ -z "${DOCKER_MARK_BR:-}" ]] && DOCKER_MARK_BR="$(detect_docker_br_iface)"
+    DOCKER_MARK_DPORT=""
+    if [[ -n "${DOCKER_FORCE_PORT:-}" ]]; then
+      DOCKER_MARK_DPORT="${DOCKER_FORCE_PORT}"
+    else
+      DOCKER_MARK_DPORT="$(wait_for_docker_udp_port "$DOCKER_MARK_BR" || true)"
+    fi
+    if [[ -n "$DOCKER_MARK_DPORT" ]]; then
+      if nft_pubudp_setup "$DOCKER_MARK_BR" "$DOCKER_MARK_DPORT" "$DOCKER_FWMARK_HEX"; then
+        setup_docker_udp_fwmark_tunnel "$EGRESS_TABLE" "$DOCKER_FWMARK_DEC" "$DOCKER_MARK_TUNNEL_PRIO"
+        DOCKER_TUNNEL_MARK_DEC="$DOCKER_FWMARK_DEC"
+        DOCKER_TUNNEL_MARK_PRIO="$DOCKER_MARK_TUNNEL_PRIO"
+        DOCKER_TUNNEL_NFT_ACTIVE=1
+        log "docker-udp nft mark + fwmark prio ${DOCKER_MARK_TUNNEL_PRIO} (${DOCKER_MARK_BR}, sport=${DOCKER_MARK_DPORT})"
+      fi
+    else
+      log "tunnel: could not detect published Docker UDP port (set DOCKER_FORCE_PORT in interfaces.env)"
+    fi
+    # Forwarded traffic uses private src before SNAT → must not hit catch-all tunnel rule (prio 90).
+    DOCKER_POLICY_RULE_TABLE="$TUN_TABLE"
     DOCKER_SRC_CIDRS_ORDERED=""
-    DOCKER_SRC_PRIO_START=72
-    setup_docker_bridge_source_uplink "$EGRESS_TABLE" "$DOCKER_SRC_PRIO_START" "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}"
+    DOCKER_SRC_PRIO_START="${DOCKER_SRC_PRIO_AFTER_MARK}"
+    setup_docker_bridge_source_uplink "$EGRESS_TABLE" "$DOCKER_SRC_PRIO_START" "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}" "$TUN_TABLE" "$DOCKER_POLICY_RULE_TABLE"
     ip -4 rule add table "$TUN_TABLE" priority "$TUN_RULE_PRIO"
   else
     # Egress mode: whole system default -> egress.
+    flush_default_via_dev awg-uplink
     if [[ -n "${EGRESS_GW:-}" ]]; then
       ip -4 route replace default via "$EGRESS_GW" dev "$EGRESS_DEV" src "$EGRESS_IP" metric "${EGRESS_METRIC:-100}"
     else
@@ -375,7 +592,14 @@ apply_cfg() {
     else
       log "to-main bypass: no docker/bridge private subnets detected"
     fi
+    if [[ "${INGRESS_ENABLED:-0}" == "1" && -n "${INGRESS_IP:-}" && "${INGRESS_IP}" != "${EGRESS_IP}" && -n "${DOCKER_SRC_CIDRS_ORDERED:-}" ]]; then
+      INGRESS_DOCKER_SNAT_CIDRS="$DOCKER_SRC_CIDRS_ORDERED"
+      setup_ingress_docker_snat "$INGRESS_IP" "$DOCKER_SRC_CIDRS_ORDERED"
+      log "ingress docker SNAT (${INGRESS_IP}) for cidrs: ${DOCKER_SRC_CIDRS_ORDERED}"
+    fi
   fi
+  # Сохраняем восстановление после stop/remove: канонический default по eth, не «случайная» строка после туннеля.
+  old_default="$(canonical_egress_default_line)"
   save_state "$old_default"
 
   log "applied: mode=${ROUTE_MODE}, egress=${EGRESS_DEV}/${EGRESS_IP}, ingress_enabled=${INGRESS_ENABLED:-0}"

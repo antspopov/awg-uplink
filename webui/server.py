@@ -541,6 +541,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "EGRESS_TABLE=202",
             "EGRESS_RULE_PRIO=80",
             f"ROUTE_MODE={shlex.quote(route_mode)}",
+            "# Tunnel + Docker-VPN: optional (see lib/awg-uplink-policy.sh / awg-webui-iface-routing-apply.sh)",
+            "# DOCKER_FORCE_PORT=39983",
+            "# DOCKER_MARK_IN=amn0",
             "",
         ]
         _mkdir(self._webui_cfg_dir())
@@ -1468,9 +1471,21 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=10.0)
                 if rc != 0:
                     return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
+                routing_err = ""
+                try:
+                    self._apply_iface_routing()
+                except Exception as ex:
+                    routing_err = str(ex)
+                payload = {
+                    "ok": True,
+                    "path": "/etc/amnezia/amneziawg/awg-uplink.conf",
+                }
+                if routing_err:
+                    payload["routing_apply_error"] = routing_err
             except Exception as e:
                 return self._send_text(500, f"tunnel import failed: {e}")
-            return self._send_json(200, {"ok": True, "path": "/etc/amnezia/amneziawg/awg-uplink.conf"})
+            else:
+                return self._send_json(200, payload)
 
         if sp == "/api/tunnel/validate":
             if self._auth_enabled and not self._session_user():
@@ -1490,7 +1505,15 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=12.0)
             if rc != 0:
                 return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
-            return self._send_json(200, {"ok": True})
+            routing_err = ""
+            try:
+                self._apply_iface_routing()
+            except Exception as ex:
+                routing_err = str(ex)
+            resp = {"ok": True}
+            if routing_err:
+                resp["routing_apply_error"] = routing_err
+            return self._send_json(200, resp)
 
         if sp == "/api/mtproto/config/save":
             if self._auth_enabled and not self._session_user():
