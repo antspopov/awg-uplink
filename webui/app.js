@@ -729,7 +729,11 @@ function initInterfaceSave() {
       btn.disabled = true;
       const res = await postJson("/api/net/routing/save", body);
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
+      if (res && res.config && res.config.route_mode && window.__awgState) {
+        window.__awgState.routeMode = res.config.route_mode;
+      }
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
+      if (res && res.warning) toast(String(res.warning), "warn", 5200);
     } catch (e) {
       setStatusById("egressStatus", "dot--bad", "ошибка применения");
       setStatusById("ingressStatus", "dot--bad", "ошибка применения");

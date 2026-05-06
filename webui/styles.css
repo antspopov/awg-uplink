@@ -1162,6 +1162,10 @@ textarea {
   border-color: rgba(251, 113, 133, 0.4);
 }
 
+.toast.warn {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
 /* Final authoritative layout for MTProto user action buttons */
 .mtp-user-actions {
   display: grid !important;

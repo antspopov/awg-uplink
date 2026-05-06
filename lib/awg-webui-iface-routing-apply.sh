@@ -113,7 +113,14 @@ apply_cfg() {
   TUN_ENDPOINTS=""
 
   if [[ "$ROUTE_MODE" == "tunnel" ]]; then
-    ip -4 link show dev awg-uplink >/dev/null 2>&1 || { log "awg-uplink is missing for tunnel mode"; exit 1; }
+    # Bootstrapping / fresh install: apply egress+ingress split even if tunnel is not ready yet.
+    if ! ip link show dev awg-uplink 2>/dev/null | grep -q ',UP,'; then
+      log "awg-uplink not present or not UP — applying egress split instead of tunnel"
+      ROUTE_MODE=egress
+    fi
+  fi
+
+  if [[ "$ROUTE_MODE" == "tunnel" ]]; then
     local awg_src
     awg_src="$(first_ipv4_for_dev awg-uplink || true)"
     # Keep route to tunnel endpoint(s) over physical uplink.

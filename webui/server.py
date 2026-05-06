@@ -484,6 +484,20 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         enabled = (out_e or "").strip() if rc_e == 0 else "disabled"
         return {"name": name, "active": active, "enabled": enabled, "ok": active == "active"}
 
+    def _tunnel_iface_up(self) -> bool:
+        """True if kernel device awg-uplink exists and has UP flag (L3 usable for tunnel routing)."""
+        rc, out, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
+        if rc != 0:
+            return False
+        try:
+            items = json.loads(out)
+            if not items:
+                return False
+            flags = items[0].get("flags", []) or []
+            return "UP" in flags
+        except Exception:
+            return False
+
     def _load_iface_config(self) -> dict:
         raw = _read_text(self._webui_iface_json(), "")
         if not raw.strip():
@@ -1319,18 +1333,6 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if sp == "/api/net/routing/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
-            rc_up, out_up, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
-            tunnel_up = False
-            if rc_up == 0:
-                try:
-                    items = json.loads(out_up)
-                    if items:
-                        flags = items[0].get("flags", []) or []
-                        tunnel_up = "UP" in flags
-                except Exception:
-                    tunnel_up = False
-            if not tunnel_up:
-                return self._send_text(409, "routing unavailable: awg-uplink is not UP")
             body = self._read_json_body()
             cfg = {
                 "egress_dev": str(body.get("egress_dev", "")).strip(),
@@ -1339,9 +1341,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ingress_dev": str(body.get("ingress_dev", "")).strip(),
                 "ingress_ip": str(body.get("ingress_ip", "")).strip(),
                 "ingress_gw": str(body.get("ingress_gw", "")).strip(),
-                "route_mode": str(body.get("route_mode", "")).strip().lower() or "egress",
+                "route_mode": str(body.get("route_mode", "") or "egress").strip().lower(),
                 "updated_at": int(time.time()),
             }
+            if cfg["route_mode"] not in ("egress", "tunnel"):
+                cfg["route_mode"] = "egress"
+            route_mode_warning = ""
+            if cfg.get("route_mode") == "tunnel" and not self._tunnel_iface_up():
+                cfg["route_mode"] = "egress"
+                route_mode_warning = (
+                    "awg-uplink is not UP; сохранено и применено в режиме egress (split egress/ingress)."
+                )
             ok, err = self._validate_iface_cfg(cfg)
             if not ok:
                 return self._send_text(400, err)
@@ -1368,15 +1378,15 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                         "runtime": runtime,
                     },
                 )
-            return self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "config": self._load_iface_config(),
-                    "runtime": runtime,
-                    "config_dir": self._webui_cfg_dir(),
-                },
-            )
+            resp = {
+                "ok": True,
+                "config": self._load_iface_config(),
+                "runtime": runtime,
+                "config_dir": self._webui_cfg_dir(),
+            }
+            if route_mode_warning:
+                resp["warning"] = route_mode_warning
+            return self._send_json(200, resp)
 
         if sp == "/api/net/routing/mode":
             if self._auth_enabled and not self._session_user():
@@ -1385,19 +1395,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             mode = str(body.get("route_mode", "")).strip().lower()
             if mode not in ("egress", "tunnel"):
                 return self._send_text(400, "route_mode must be egress|tunnel")
-            if mode == "tunnel":
-                rc_up, out_up, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
-                tunnel_up = False
-                if rc_up == 0:
-                    try:
-                        items = json.loads(out_up)
-                        if items:
-                            flags = items[0].get("flags", []) or []
-                            tunnel_up = "UP" in flags
-                    except Exception:
-                        tunnel_up = False
-                if not tunnel_up:
-                    return self._send_text(409, "awg-uplink tunnel is not UP")
+            if mode == "tunnel" and not self._tunnel_iface_up():
+                return self._send_text(409, "awg-uplink tunnel is not UP")
             cfg = self._load_iface_config()
             if not cfg:
                 return self._send_text(400, "interface config is empty")
