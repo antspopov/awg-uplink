@@ -23,6 +23,35 @@ first_ipv4_for_dev() {
   ip -4 -o addr show dev "$d" 2>/dev/null | awk '{print $4}' | awk -F/ 'NR==1 {print $1}'
 }
 
+rp_filter_read() {
+  local d=$1
+  [[ -n "$d" && -r "/proc/sys/net/ipv4/conf/${d}/rp_filter" ]] || {
+    echo ""
+    return 0
+  }
+  cat "/proc/sys/net/ipv4/conf/${d}/rp_filter"
+}
+
+# Default route через туннель ломает strict RPF для DNAT Docker (см. awg-uplink-policy.sh RP_LOOSE=2).
+rp_filter_tunnel_prepare() {
+  RP_RESTORE_EGRESS_VAL=""
+  RP_RESTORE_INGRESS_VAL=""
+  RP_INGRESS_RESTORE_DEV=""
+  RP_RESTORE_EGRESS_VAL=$(rp_filter_read "$EGRESS_DEV")
+  sysctl -q "net.ipv4.conf.${EGRESS_DEV}.rp_filter=2" 2>/dev/null || true
+  if [[ -n "${INGRESS_DEV:-}" && "${INGRESS_DEV}" != "${EGRESS_DEV}" ]]; then
+    RP_INGRESS_RESTORE_DEV="${INGRESS_DEV}"
+    RP_RESTORE_INGRESS_VAL=$(rp_filter_read "${INGRESS_DEV}")
+    sysctl -q "net.ipv4.conf.${INGRESS_DEV}.rp_filter=2" 2>/dev/null || true
+  fi
+}
+
+rp_filter_restore_saved() {
+  local edev=$1 egress_val=$2 idev=$3 ingress_val=$4
+  [[ -n "$edev" && -n "$egress_val" ]] && sysctl -q "net.ipv4.conf.${edev}.rp_filter=${egress_val}" 2>/dev/null || true
+  [[ -n "$idev" && -n "$ingress_val" ]] && sysctl -q "net.ipv4.conf.${idev}.rp_filter=${ingress_val}" 2>/dev/null || true
+}
+
 cidr_list_add() {
   local base="$1" add="$2" x
   [[ -z "$add" ]] && {
@@ -164,6 +193,9 @@ save_state() {
     printf 'BYPASS_PRIO_BASE=%q\n' "${BYPASS_PRIO_BASE:-60}"
     printf 'DOCKER_SRC_CIDRS_ORDERED=%q\n' "${DOCKER_SRC_CIDRS_ORDERED:-}"
     printf 'DOCKER_SRC_PRIO_START=%q\n' "${DOCKER_SRC_PRIO_START:-72}"
+    printf 'RP_RESTORE_EGRESS_VAL=%q\n' "${RP_RESTORE_EGRESS_VAL:-}"
+    printf 'RP_RESTORE_INGRESS_VAL=%q\n' "${RP_RESTORE_INGRESS_VAL:-}"
+    printf 'RP_INGRESS_RESTORE_DEV=%q\n' "${RP_INGRESS_RESTORE_DEV:-}"
   } >"$tmp"
   mv -f -- "$tmp" "$STATE_FILE"
 }
@@ -186,6 +218,7 @@ remove_rules() {
   local bypass_prio_base="${BYPASS_PRIO_BASE:-60}"
   local dock_cidrs="${DOCKER_SRC_CIDRS_ORDERED:-}"
   local dock_prio="${DOCKER_SRC_PRIO_START:-72}"
+  rp_filter_restore_saved "$edev" "${RP_RESTORE_EGRESS_VAL:-}" "${RP_INGRESS_RESTORE_DEV:-}" "${RP_RESTORE_INGRESS_VAL:-}"
   teardown_docker_bridge_source_uplink "$etab" "$dock_prio" "$dock_cidrs"
   [[ -n $idev ]] && ip rule del from "$idev/32" table "$itab" priority "$iprio" 2>/dev/null || true
   [[ -n $eip ]] && ip rule del from "$eip/32" table "$etab" priority "$eprio" 2>/dev/null || true
@@ -282,6 +315,7 @@ apply_cfg() {
     else
       ip -4 route replace default dev awg-uplink
     fi
+    rp_filter_tunnel_prepare
 
     # Keep replies from public egress/ingress IPs through physical uplinks.
     if [[ -n "${EGRESS_GW:-}" ]]; then
