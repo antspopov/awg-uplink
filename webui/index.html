@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>awg-uplink — управление</title>
+    <base id="baseTag" href="./" />
+    <link rel="stylesheet" href="./styles.css?v=20260506-1" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">AWG</div>
+          <div class="brand-text">
+            <div class="title">awg-uplink</div>
+            <div class="subtitle">Веб‑интерфейс управления</div>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <button class="btn" type="button" id="logoutBtn">Выйти</button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Мониторинг сервера</h2>
+            <div class="hint">Обновление каждые 2 секунды (CPU, RAM, сеть, load, uptime).</div>
+          </div>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-title">CPU</div>
+              <div class="metric-value" id="mCpu">--%</div>
+              <div class="metric-bar"><div class="metric-bar-fill" id="mCpuBar"></div></div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-title">RAM</div>
+              <div class="metric-corner" id="mMemDetails">-- / --</div>
+              <div class="metric-value" id="mMem">--%</div>
+              <div class="metric-bar"><div class="metric-bar-fill" id="mMemBar"></div></div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-title">Сеть RX/TX</div>
+              <div class="metric-value metric-value--sm" id="mNet">-- / --</div>
+              <div class="metric-sub" id="mNetTotals">Σ -- / --</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-title">Load Avg</div>
+              <div class="metric-value metric-value--sm" id="mLoad">-- -- --</div>
+              <div class="metric-sub" id="mCpuCount">CPU: --</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-title">Uptime</div>
+              <div class="metric-value metric-value--sm" id="mUptime">--</div>
+              <div class="metric-sub" id="mUpdatedAt">обновление: --</div>
+            </div>
+          </div>
+
+          <div class="panel-sep"></div>
+
+          <div class="panel-head">
+            <h2>Настройка интерфейсов</h2>
+            <div class="hint">Настройка сетевых параметров сервера.</div>
+          </div>
+
+          <div class="grid interface-grid">
+            <div class="card">
+              <div class="card-head">
+                <div class="card-title">Egress интерфейс</div>
+                <div class="status" id="egressStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">не применено</span>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Интерфейс</label>
+                  <select id="egressDev"></select>
+                </div>
+                <div class="field">
+                  <label>IPv4 адрес</label>
+                  <select id="egressIp"></select>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Шлюз (IPv4)</label>
+                  <input id="egressGw" type="text" placeholder="например: 192.0.2.1" />
+                  <div class="help">
+                    Egress — основной выход в интернет с маршрутом по умолчанию.
+                    Если шлюз не указан, будет использовано системное значение.
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div class="card-title">Ingress интерфейс</div>
+                <div class="status" id="ingressStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">не применено</span>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Интерфейс</label>
+                  <select id="ingressDev"></select>
+                </div>
+                <div class="field">
+                  <label>IPv4 адрес</label>
+                  <select id="ingressIp"></select>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Шлюз (IPv4)</label>
+                  <input id="ingressGw" type="text" placeholder="например: 198.51.100.1" />
+                  <div class="help">
+                    Ingress — дополнительный интерфейс/адрес для подключения пользователей к серверу из интернета.
+                    Если дополнительного интерфейса/адреса на сервере нет, настраивать ingress не нужно — роль ingress
+                    возьмет на себя Egress интерфейс.
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card interface-tunnel-card">
+              <div class="card-head">
+                <div class="card-title">Туннельный интерфейс</div>
+                <div class="status" id="tunnelStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">awg-uplink: неизвестно</span>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Импортировать конфиг</label>
+                  <div class="file">
+                    <input id="confFileInput" class="file-input-hidden" type="file" accept=".conf,.txt" />
+                    <button class="btn" id="chooseFileBtn" type="button">Выбрать файл…</button>
+                    <button class="btn" id="openImportModalBtn" type="button">Вставить конфиг текстом…</button>
+                    <button class="btn" id="importApplyBtn" type="button" disabled>Импортировать</button>
+                  </div>
+                  <div class="help" id="confHelp">Конфиг не задан.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <div class="actions-left">
+              <button class="btn btn--primary" type="button" id="ifaceSaveBtn">Сохранить</button>
+              <div class="actions-note">Проверьте параметры перед сохранением.</div>
+            </div>
+            <button class="btn" type="button" id="netplanOpenBtn">Edit netplan</button>
+          </div>
+
+          <div class="panel-sep"></div>
+
+          <div class="panel-head">
+            <h2>Роутинг</h2>
+            <div class="hint">Выбор режима маршрута по умолчанию.</div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div class="users-head-left">
+                <div class="card-title">Маршрут по умолчанию</div>
+                <div class="status" id="routingModeStatus">
+                  <span class="dot dot--warn"></span>
+                  <span class="status-text">не применено</span>
+                </div>
+              </div>
+            </div>
+            <div class="routing-modes" id="routingModes">
+              <button class="btn routing-mode-btn is-active" type="button" data-route-mode="egress">
+                В Egress
+              </button>
+              <button class="btn routing-mode-btn" type="button" data-route-mode="tunnel">
+                В тунельный интерфейс
+              </button>
+              <button class="btn routing-mode-btn" type="button" data-route-mode="georouting">
+                Использовать georouting
+              </button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div class="users-head-left">
+                <div class="card-title">Настройка georouting</div>
+                <div class="status" id="geoRoutingStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">выберите режим georouting</span>
+                </div>
+              </div>
+            </div>
+            <fieldset id="geoRoutingFieldset" class="geo-fieldset" disabled>
+              <div class="row">
+                <div class="field">
+                  <label>Куда отправлять маршрут до ресурсов из списка</label>
+                  <select id="geoRouteTarget">
+                    <option value="tunnel">Тунельный интерфейс</option>
+                    <option value="egress">Egress</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field geo-modes-field">
+                <label>Режимы georouting</label>
+                <div class="geo-columns">
+                  <div class="geo-col">
+                    <div class="geo-toggle-row">
+                      <button class="switch geo-switch" id="geoIpModeBtn" type="button" title="Включить IP список"></button>
+                      <span class="geo-toggle-label">По списку IP</span>
+                    </div>
+                    <div class="geo-ready-row">
+                      <div class="status" id="geoIpReadyStatus">
+                        <span class="dot dot--unknown"></span>
+                        <span class="status-text">готовые списки: 0 (не задано)</span>
+                      </div>
+                      <div class="geo-ready-actions">
+                        <button class="btn geo-link-btn" id="geoIpReadyAddBtn" type="button">Готовые списки IP</button>
+                      </div>
+                    </div>
+                    <div class="geo-list-grid">
+                      <button class="btn geo-list-btn" id="geoEditIpIncludeBtn" type="button">Include IP</button>
+                      <button class="btn geo-list-btn" id="geoEditIpExcludeBtn" type="button">Exclude IP</button>
+                    </div>
+                  </div>
+                  <div class="geo-col">
+                    <div class="geo-toggle-row">
+                      <button class="switch geo-switch" id="geoDomainModeBtn" type="button" title="Включить доменные списки"></button>
+                      <span class="geo-toggle-label">По списку доменов</span>
+                    </div>
+                    <div class="geo-ready-row">
+                      <div class="status" id="geoDomainReadyStatus">
+                        <span class="dot dot--unknown"></span>
+                        <span class="status-text">готовые списки: 0 (не задано)</span>
+                      </div>
+                      <div class="geo-ready-actions">
+                        <button class="btn geo-link-btn" id="geoDomainReadyAddBtn" type="button">Готовые списки доменов</button>
+                      </div>
+                    </div>
+                    <div class="geo-list-grid">
+                      <button class="btn geo-list-btn" id="geoEditDomainIncludeBtn" type="button">Include домен</button>
+                      <button class="btn geo-list-btn" id="geoEditDomainExcludeBtn" type="button">Exclude домен</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="help">Можно включить оба режима одновременно.</div>
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="panel-sep"></div>
+
+          <div class="panel-head">
+            <div class="panel-head-left">
+              <h2>Настройка MTProto</h2>
+              <div class="status" id="mtprotoServiceStatus">
+                <span class="dot dot--unknown"></span>
+                <span class="status-text">health: неизвестно</span>
+              </div>
+            </div>
+            <div class="hint">Пользователи, ссылки, masking health и редактирование config.toml.</div>
+          </div>
+
+          <div class="grid mtproto-grid">
+            <div class="card">
+              <div class="card-head">
+                <div class="users-head-left">
+                  <div class="card-title">Пользователи и ссылки</div>
+                  <div class="status" id="mtprotoUsersStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">не загружено</span>
+                  </div>
+                </div>
+                <div class="users-head-right">
+                  <div class="users-meta" id="mtpUsersMeta">-- users · sessions --/-- · unassigned --</div>
+                  <button class="btn" id="mtpOpenAddUserBtn" type="button">+ Add User</button>
+                </div>
+              </div>
+              <div class="mtp-users-list" id="mtpUsersBody"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div class="users-head-left">
+                  <div class="card-title">Masking health</div>
+                  <div class="status" id="mtpMaskStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">не загружено</span>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-health-list">
+                <div class="mt-health-row">
+                  <div class="mt-health-key">Mode</div>
+                  <div class="mt-health-val" id="mtpMaskModeValue">--</div>
+                </div>
+                <div class="mt-health-row">
+                  <div class="mt-health-key">Endpoint</div>
+                  <div class="mt-health-val" id="mtpMaskEndpointValue">--</div>
+                </div>
+                <div class="mt-health-row">
+                  <div class="mt-health-key">Nginx</div>
+                  <div class="mt-health-val" id="mtpNginxValue">--</div>
+                </div>
+                <div class="mt-health-row">
+                  <div class="mt-health-key">Health Timer</div>
+                  <div class="mt-health-val" id="mtpHealthTimerValue">--</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mtproto-config-card">
+            <div class="card-head">
+              <div class="users-head-left">
+                <div class="card-title">config.toml</div>
+                <div class="status" id="mtpConfigStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">не загружено</span>
+                </div>
+              </div>
+              <div class="users-head-right">
+                <div class="users-meta" id="mtpConfigPathLabel">Путь: --</div>
+                <button class="btn" id="mtpOpenConfigBtn" type="button">Правка config.toml</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div>awg-uplink webui</div>
+      </footer>
+    </div>
+
+    <div class="modal-overlay hidden" id="importModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="importModalTitle">Импорт конфигурации (текст)</div>
+          <button class="icon-btn" id="importModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label>Вставьте содержимое exported.conf</label>
+            <textarea id="confText" rows="12" placeholder="[Interface]&#10;..."></textarea>
+            <div class="help">
+              Сейчас конфиг никуда не записывается — сохраняем только в памяти страницы (для будущей интеграции).
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="importModalSaveBtn" type="button">Сохранить в форме</button>
+          <button class="btn" id="importModalCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="mtpUserModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mtpUserModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="mtpUserModalTitle">Добавить пользователя MTProto</div>
+          <button class="icon-btn" id="mtpUserModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label>Имя пользователя</label>
+            <input id="mtpUserName" type="text" placeholder="например: alice" />
+          </div>
+          <div class="field field--spaced">
+            <label>Secret (32 hex)</label>
+            <input id="mtpUserSecret" type="text" placeholder="00112233445566778899aabbccddeeff" />
+          </div>
+          <div class="help" id="mtpUserFormStatus"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="mtpUserSaveBtn" type="button">Сохранить</button>
+          <button class="btn" id="mtpUserModalCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="mtpConfigModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mtpConfigModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="mtpConfigModalTitle">Правка config.toml</div>
+          <button class="icon-btn" id="mtpConfigModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <textarea id="mtpConfigText" rows="16" placeholder="[server]&#10;..."></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="mtpConfigSaveBtn" type="button">Сохранить config.toml</button>
+          <button class="btn" id="mtpConfigModalCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="geoListModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="geoListModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="geoListModalTitle">Правка списка</div>
+          <button class="icon-btn" id="geoListModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <textarea id="geoListText" rows="12" placeholder="one item per line"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="geoListSaveBtn" type="button">Сохранить</button>
+          <button class="btn" id="geoListCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="geoReadyModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="geoReadyModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="geoReadyModalTitle">Готовые списки</div>
+          <button class="icon-btn" id="geoReadyModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label>Добавить список</label>
+            <div class="routing-modes">
+              <input id="geoReadyNewUrl" type="text" placeholder="https://example.com/list.txt" />
+              <button class="btn" id="geoReadyAddBtn" type="button">Добавить список</button>
+            </div>
+          </div>
+          <div class="help" id="geoReadyModalHint">
+            Требуется URL до списка в формате <code>.lst</code> с простым перечислением:
+            один IP/сеть в одной строке (для IP-списков), один домен в одной строке (для доменных списков).
+          </div>
+          <div class="geo-ready-list" id="geoReadyList"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="geoReadyModalCloseBtn2" type="button">Закрыть</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="netplanModalOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="netplanModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="netplanModalTitle">Правка netplan</div>
+          <button class="icon-btn" id="netplanModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="help" id="netplanPathHint">Файл: —</div>
+          <textarea id="netplanText" rows="18" placeholder="network: ..."></textarea>
+          <div class="help" id="netplanErrorHint"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="netplanSaveBtn" type="button">Сохранить и применить</button>
+          <button class="btn" id="netplanModalCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./config.js"></script>
+    <script src="./app.js?v=20260506-1"></script>
+  </body>
+</html>
+

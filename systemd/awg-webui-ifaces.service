@@ -1,0 +1,15 @@
+[Unit]
+Description=AWG WebUI interface routing apply
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=AWG_WEBUI_IFACE_ENV=/etc/awg-uplink-webui/interfaces.env
+ExecStart=/usr/local/sbin/awg-webui-iface-routing-apply.sh apply
+ExecStop=/usr/local/sbin/awg-webui-iface-routing-apply.sh remove
+
+[Install]
+WantedBy=multi-user.target
+

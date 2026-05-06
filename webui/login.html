@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>awg-uplink — вход</title>
+    <base id="baseTag" href="./" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="login-page">
+      <div class="login-card">
+        <div class="login-brand">
+          <div class="logo">AWG</div>
+          <div>
+            <div class="title">awg-uplink</div>
+            <div class="subtitle">Вход в панель управления</div>
+          </div>
+        </div>
+
+        <div class="login-form">
+          <div class="field">
+            <label>Логин</label>
+            <input id="loginUser" type="text" autocomplete="username" placeholder="например: admin" />
+          </div>
+          <div class="field field--spaced">
+            <label>Пароль</label>
+            <input
+              id="loginPass"
+              type="password"
+              autocomplete="current-password"
+              placeholder="пароль"
+            />
+          </div>
+
+          <div class="login-actions">
+            <button class="btn btn--primary" id="loginBtn" type="button">Войти</button>
+            <div class="help" id="loginHelp">Авторизация: digest (challenge-response).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="./config.js"></script>
+    <script src="./login.js"></script>
+  </body>
+</html>
+

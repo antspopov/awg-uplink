@@ -1,0 +1,16 @@
+[Unit]
+Description=AWG Uplink Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/awg-uplink/webui
+EnvironmentFile=-/etc/awg-uplink-webui/webui.env
+ExecStart=/usr/bin/python3 /opt/awg-uplink/webui/server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
