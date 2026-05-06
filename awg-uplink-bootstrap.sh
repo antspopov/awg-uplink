@@ -18,6 +18,7 @@ AMNEZIAWG_KERNEL_REPO=${AMNEZIAWG_KERNEL_REPO:-https://github.com/amnezia-vpn/am
 AMNEZIAWG_TOOLS_REPO=${AMNEZIAWG_TOOLS_REPO:-https://github.com/amnezia-vpn/amneziawg-tools.git}
 
 WITH_MTPROTO_PROXY=${WITH_MTPROTO_PROXY:-0}
+WITH_GEO_ROUTING=${WITH_GEO_ROUTING:-0}
 MTPROTO_BOOTSTRAP_URL=${MTPROTO_BOOTSTRAP_URL:-https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh}
 MTPROTO_PORT=${MTPROTO_PORT:-443}
 MTPROTO_DOMAIN=${MTPROTO_DOMAIN:-wb.ru}
@@ -60,6 +61,7 @@ usage() {
   Если задан непустой \$AMNEZIA_DOCKER_NAMES (через пробел), проверяются только эти точные имена.
 
   --split-routing-wizard  После inject: интерактивный мастер split-routing (ingress для клиентов / egress для исходящего трафика и unit awg-uplink-split@IFACE). См. lib/awg-uplink-split-wizard.sh --help
+  --with-geo-routing     После inject: selective geo-routing по списку префиксов (allyouneed.lst) через awg-uplink; default route в main остаётся через egress.
 
 AmneziaWG (интерфейс ${CANON_STEM}, unit awg-quick@${CANON_STEM})
   --amneziawg-from-source   Сборка amneziawg (DKMS) + amneziawg-tools из Git, без PPA.
@@ -94,6 +96,7 @@ MTProto (mtbuddy / mtproto.zig, только с --with-mtproto-proxy)
               MTPROTO_PUBLIC_IP, MTPROTO_MIDDLE_PROXY_NAT_IP, MTPROTO_EGRESS_IP_URL,
               MTPROTO_NO_DPI=1, MTPROTO_MIDDLE_PROXY=1, MTPROTO_DRS=0 — не включать drs в [censorship],
               MTPROTO_DASHBOARD=0
+  GEO:        WITH_GEO_ROUTING=1 (установка отдельного модуля selective routing по списку префиксов)
   Дашборд:   MTPROTO_DASHBOARD_NGINX=0, MTPROTO_DASHBOARD_NGINX_MASK_PORT, MTPROTO_DASHBOARD_NGINX_SITE,
               MTPROTO_DASHBOARD_USER, MTPROTO_DASHBOARD_PASSWORD, MTPROTO_DASHBOARD_MONITOR_ADDR, MTPROTO_DASHBOARD_MONITOR_PORT
   Docker:    AMNEZIA_DOCKER_NAME_PATTERN (ERE имени контейнера), AMNEZIA_DOCKER_NAMES — явный список имён (перекрывает шаблон); см. lib/awg-inject-uplink-policy.sh --help
@@ -118,6 +121,7 @@ while [[ $# -gt 0 ]]; do
 	--amneziawg-from-source) AMNEZIAWG_FROM_SOURCE=1 ;;
 	--amneziawg-reinstall) AMNEZIAWG_REINSTALL=1 ;;
 	--split-routing-wizard) SPLIT_ROUTING_WIZARD=1 ;;
+	--with-geo-routing) WITH_GEO_ROUTING=1 ;;
 	--with-mtproto-proxy) WITH_MTPROTO_PROXY=1 ;;
 	--mtproto-no-dpi) MTPROTO_NO_DPI=1 ;;
 	--mtproto-middle-proxy) MTPROTO_MIDDLE_PROXY=1 ;;
@@ -240,12 +244,12 @@ docker_amnezia_server_running() {
 		return 1
 	fi
 	if [[ -n ${AMNEZIA_DOCKER_NAMES:-} ]] && [[ -n ${AMNEZIA_DOCKER_NAMES// } ]]; then
-		for n in $AMNEZIA_DOCKER_NAMES; do
-			[[ -n $n ]] || continue
-			if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$n"; then
-				return 0
-			fi
-		done
+	for n in $AMNEZIA_DOCKER_NAMES; do
+		[[ -n $n ]] || continue
+		if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$n"; then
+			return 0
+		fi
+	done
 		return 1
 	fi
 	while IFS= read -r line; do
@@ -434,7 +438,7 @@ ensure_amneziawg() {
 	if [[ ${AMNEZIAWG_REINSTALL:-0} -eq 1 ]] && dpkg -s amneziawg >/dev/null 2>&1; then
 		apt-get install -y --reinstall amneziawg
 	else
-		apt-get install -y amneziawg
+	apt-get install -y amneziawg
 	fi
 
 	awg_quick_present || die "после установки amneziawg не найден awg-quick в PATH (проверьте dpkg -l amneziawg)"
@@ -447,6 +451,13 @@ ensure_amneziawg_dispatch() {
 	else
 		ensure_amneziawg
 	fi
+}
+
+ensure_policy_runtime_deps() {
+	export DEBIAN_FRONTEND=noninteractive
+	apt-get update -qq
+	# awg-uplink-policy.sh использует nft для маркировки Docker-UDP.
+	apt-get install -y nftables
 }
 
 remove_legacy_mtproto_tunnel_artifacts() {
@@ -694,6 +705,12 @@ PY
 
 run_mtbuddy_install() {
 	command -v curl >/dev/null 2>&1 || die "нужен curl для загрузки mtbuddy"
+	if ! command -v minisign >/dev/null 2>&1; then
+		log "MTProto: устанавливаю minisign для проверки подписи релизов mtbuddy…"
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update -qq
+		apt-get install -y minisign || die "не удалось установить minisign (или используйте MTPROTO_INSECURE=1 на свой риск)"
+	fi
 	local -a args=(install --yes --port "$MTPROTO_PORT" --domain "$MTPROTO_DOMAIN" --user "$MTPROTO_USER")
 	[[ -n ${MTPROTO_SECRET:-} ]] && args+=(--secret "$MTPROTO_SECRET")
 	[[ ${MTPROTO_NO_DPI:-0} -eq 1 ]] && args+=(--no-dpi)
@@ -1083,7 +1100,7 @@ print_bootstrap_summary() {
 	else
 		log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	fi
-	log ""
+		log ""
 }
 
 main() {
@@ -1091,6 +1108,8 @@ main() {
 	require_docker_amnezia
 	log "Шаг 2/4: AmneziaWG…"
 	ensure_amneziawg_dispatch
+	log "Шаг 2.1/4: зависимости policy runtime…"
+	ensure_policy_runtime_deps
 	export AMNEZIA_DOCKER_NAME_PATTERN="${AMNEZIA_DOCKER_NAME_PATTERN:-^amnezia-awg}"
 	if [[ -v AMNEZIA_DOCKER_NAMES ]]; then
 		export AMNEZIA_DOCKER_NAMES
@@ -1102,6 +1121,10 @@ main() {
 	if [[ ${SPLIT_ROUTING_WIZARD:-0} -eq 1 ]]; then
 		log "Мастер split-routing (ingress/egress)…"
 		bash -- "$ROOTDIR/lib/awg-uplink-split-wizard.sh" || die "мастер split-routing завершился с ошибкой"
+	fi
+	if [[ ${WITH_GEO_ROUTING:-0} -eq 1 ]]; then
+		log "Дополнительно: geo-routing (список префиксов -> awg-uplink)…"
+		bash -- "$ROOTDIR/lib/awg-uplink-geo-routing-install.sh" || die "awg-uplink-geo-routing-install.sh завершился с ошибкой"
 	fi
 	systemctl daemon-reload
 	systemctl enable "awg-quick@${CANON_STEM}.service"

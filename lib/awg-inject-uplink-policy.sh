@@ -152,7 +152,7 @@ write_env
 POSTUP=": \"${MARKER}\"; \"$HOOK_DST\" postup \"$WGABS\""
 POSTDOWN=": \"${MARKER_DOWN}\"; \"$HOOK_DST\" postdown \"$WGABS\""
 
-# Убирает пустые Amnezia-поля I2=, I3= (awg-quick ругается) и IPv6 из AllowedIPs.
+# Убирает пустые Amnezia-поля I2=, I3=, DNS= (чтобы не дёргать resolvconf) и IPv6 из AllowedIPs.
 sanitize_amnezia_conf() {
 	awk '
 	function trim(s) {
@@ -188,7 +188,19 @@ sanitize_amnezia_conf() {
 		if (out == "") out = "0.0.0.0/0"
 		return substr(l, 1, keylen) out
 	}
+	BEGIN { in_iface = 0 }
+	/^\[Interface\]/ {
+		in_iface = 1
+		print
+		next
+	}
+	/^\[/ {
+		in_iface = 0
+		print
+		next
+	}
 	{
+		if (in_iface && $0 ~ /^[[:space:]]*DNS[[:space:]]*=/) next
 		if (empty_amnezia_i($0)) next
 		print strip_ipv6_allowedips($0)
 	}
