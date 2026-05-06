@@ -12,15 +12,129 @@ CFG_DIR=${AWG_WEBUI_CFG_DIR:-/etc/awg-uplink-webui}
 
 WEBUI_SERVICE=awg-uplink-webui.service
 IFACE_SERVICE=awg-webui-ifaces.service
+AMNEZIA_APT_LIST=/etc/apt/sources.list.d/amnezia-ppa.list
+AMNEZIAWG_SRC_CACHE=${AMNEZIAWG_SRC_CACHE:-/var/cache/awg-uplink-amneziawg}
+AMNEZIAWG_KERNEL_REPO=${AMNEZIAWG_KERNEL_REPO:-https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git}
+AMNEZIAWG_TOOLS_REPO=${AMNEZIAWG_TOOLS_REPO:-https://github.com/amnezia-vpn/amneziawg-tools.git}
 
 log() { echo "[awg-webui-bootstrap] $*"; }
 die() { echo "[awg-webui-bootstrap] ERROR: $*" >&2; exit 1; }
 
+awg_quick_present() {
+  command -v awg-quick >/dev/null 2>&1
+}
+
+add_amnezia_apt_debian() {
+  apt-get install -y gnupg2 ca-certificates curl software-properties-common
+  apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828 2>/dev/null \
+    || die "failed to import Amnezia PPA key"
+  {
+    echo 'deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main'
+    echo 'deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main'
+  } >"$AMNEZIA_APT_LIST"
+}
+
+add_amnezia_apt_ubuntu() {
+  apt-get install -y software-properties-common gnupg2 "linux-headers-$(uname -r)" 2>/dev/null \
+    || apt-get install -y software-properties-common gnupg2
+  add-apt-repository -y ppa:amnezia/ppa
+}
+
+ensure_amneziawg() {
+  if awg_quick_present; then
+    log "awg-quick already present."
+    return 0
+  fi
+  [[ -f /etc/os-release ]] || die "missing /etc/os-release"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y ca-certificates curl
+  case "${ID:-}" in
+    ubuntu|pop) add_amnezia_apt_ubuntu ;;
+    debian|devuan|raspbian) add_amnezia_apt_debian ;;
+    *) die "unsupported distro for auto amneziawg install: ${ID:-unknown}" ;;
+  esac
+  apt-get update -qq
+  if apt-get install -y amneziawg; then
+    awg_quick_present || die "amneziawg installed but awg-quick not found"
+    log "amneziawg installed from apt."
+    return 0
+  fi
+  log "amneziawg apt install failed, fallback to source build..."
+  ensure_amneziawg_from_source
+}
+
+ensure_amneziawg_from_source() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y ca-certificates git dkms build-essential pkg-config \
+    libmnl-dev libelf-dev libssl-dev debhelper dh-python iproute2
+
+  mkdir -p "$AMNEZIAWG_SRC_CACHE"
+  local kroot="$AMNEZIAWG_SRC_CACHE/amneziawg-linux-kernel-module"
+  local troot="$AMNEZIAWG_SRC_CACHE/amneziawg-tools"
+
+  if [[ -d "$kroot/.git" ]]; then
+    git -C "$kroot" fetch --all --tags --prune
+    git -C "$kroot" reset --hard origin/HEAD
+  else
+    rm -rf "$kroot"
+    git clone "$AMNEZIAWG_KERNEL_REPO" "$kroot"
+  fi
+  if [[ -d "$troot/.git" ]]; then
+    git -C "$troot" fetch --all --tags --prune
+    git -C "$troot" reset --hard origin/HEAD
+  else
+    rm -rf "$troot"
+    git clone "$AMNEZIAWG_TOOLS_REPO" "$troot"
+  fi
+
+  local dver
+  dver=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "$kroot/dkms.conf" | head -1)
+  [[ -n "$dver" ]] || die "cannot read PACKAGE_VERSION from $kroot/dkms.conf"
+
+  dkms remove -m amneziawg -v "$dver" --all --force 2>/dev/null || true
+  rm -rf /usr/src/amneziawg-* 2>/dev/null || true
+
+  cp -a "$kroot" "/usr/src/amneziawg-$dver"
+  dkms add -m amneziawg -v "$dver" || true
+  dkms build -m amneziawg -v "$dver" || die "dkms build failed"
+  dkms install -m amneziawg -v "$dver" || die "dkms install failed"
+
+  make -C "$troot/src" tools
+  install -m 755 "$troot/src/awg" /usr/bin/awg
+  install -m 755 "$troot/src/awg-quick/linux.bash" /usr/bin/awg-quick
+
+  modprobe amneziawg 2>/dev/null || true
+  awg_quick_present || die "source build completed but awg-quick missing"
+  log "amneziawg installed from source fallback."
+}
+
 ensure_env_key() {
   local file=$1 key=$2 value=$3
-  if ! rg -q "^${key}=" "$file"; then
+  if ! awk -F= -v k="$key" '$1==k {found=1} END {exit found?0:1}' "$file"; then
     printf '%s=%s\n' "$key" "$value" >>"$file"
   fi
+}
+
+dedupe_env_file() {
+  local file=$1 tmp
+  tmp="${file}.tmp.$$"
+  awk '
+    /^[[:space:]]*#/ { print; next }
+    /^[[:space:]]*$/ { print; next }
+    {
+      split($0, a, "=")
+      k=a[1]
+      if (!(k in seen)) {
+        seen[k]=1
+        print
+      }
+    }
+  ' "$file" >"$tmp"
+  mv -f -- "$tmp" "$file"
 }
 
 usage() {
@@ -57,6 +171,8 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io >/dev/null
 fi
+
+ensure_amneziawg
 
 log "Creating directories..."
 install -d -m 755 "$APP_DIR"
@@ -98,6 +214,7 @@ ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_PORT" "8080"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_BASE_PATH" "/"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_NO_AUTH" "0"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_CFG_DIR" "/etc/awg-uplink-webui"
+dedupe_env_file "$CFG_DIR/webui.env"
 chmod 600 "$CFG_DIR/webui.env"
 
 log "Reloading systemd daemon..."

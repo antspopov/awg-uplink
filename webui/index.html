@@ -130,6 +130,14 @@
               </div>
             </div>
 
+            <div class="actions interface-actions-inline">
+              <div class="actions-left">
+                <button class="btn btn--primary" type="button" id="ifaceSaveBtn">Сохранить</button>
+                <div class="actions-note">Проверьте параметры перед сохранением.</div>
+              </div>
+              <button class="btn" type="button" id="netplanOpenBtn">Edit netplan</button>
+            </div>
+
             <div class="card interface-tunnel-card">
               <div class="card-head">
                 <div class="card-title">Туннельный интерфейс</div>
@@ -144,22 +152,19 @@
                   <label>Импортировать конфиг</label>
                   <div class="file">
                     <input id="confFileInput" class="file-input-hidden" type="file" accept=".conf,.txt" />
-                    <button class="btn" id="chooseFileBtn" type="button">Выбрать файл…</button>
-                    <button class="btn" id="openImportModalBtn" type="button">Вставить конфиг текстом…</button>
-                    <button class="btn" id="importApplyBtn" type="button" disabled>Импортировать</button>
+                    <div class="file-left">
+                      <button class="btn" id="chooseFileBtn" type="button">Выбрать файл…</button>
+                      <button class="btn" id="openImportModalBtn" type="button">Вставить конфиг текстом…</button>
+                      <button class="btn" id="importApplyBtn" type="button" disabled>Импортировать</button>
+                    </div>
+                    <div class="file-right">
+                      <button class="btn" id="restartTunnelBtn" type="button">Перезапустить awg-uplink</button>
+                    </div>
                   </div>
                   <div class="help" id="confHelp">Конфиг не задан.</div>
                 </div>
               </div>
             </div>
-          </div>
-
-          <div class="actions">
-            <div class="actions-left">
-              <button class="btn btn--primary" type="button" id="ifaceSaveBtn">Сохранить</button>
-              <div class="actions-note">Проверьте параметры перед сохранением.</div>
-            </div>
-            <button class="btn" type="button" id="netplanOpenBtn">Edit netplan</button>
           </div>
 
           <div class="panel-sep"></div>

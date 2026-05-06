@@ -165,6 +165,7 @@ function initImportModal(state) {
   const fileInput = $("confFileInput");
   const chooseFileBtn = $("chooseFileBtn");
   const openTextBtn = $("openImportModalBtn");
+  const restartBtn = $("restartTunnelBtn");
 
   function render() {
     const hasText = Boolean((state.confText || "").trim());
@@ -213,9 +214,40 @@ function initImportModal(state) {
     render();
   });
 
-  $("importApplyBtn").addEventListener("click", () => {
-    setTunnelStatus("dot--warn", "awg-uplink: импорт конфигурации");
-    setTimeout(() => refreshTunnelStatus(), 1200);
+  $("importApplyBtn").addEventListener("click", async () => {
+    try {
+      let cfgText = "";
+      const f = fileInput.files && fileInput.files[0];
+      if (state.importMode === "file" && f) {
+        cfgText = await f.text();
+      } else {
+        cfgText = String(state.confText || "");
+      }
+      if (!cfgText.trim()) {
+        toast("Конфиг не задан.", "error", 2200);
+        return;
+      }
+      setTunnelStatus("dot--warn", "awg-uplink: импорт конфигурации");
+      await postJson("/api/tunnel/validate", { config_text: cfgText });
+      await postJson("/api/tunnel/import", { config_text: cfgText });
+      toast("Конфиг awg-uplink импортирован.", "ok");
+      await refreshTunnelStatus(state);
+    } catch (e) {
+      setTunnelStatus("dot--bad", "awg-uplink: ошибка импорта");
+      toast(`Ошибка импорта: ${e?.message || "unknown"}`, "error", 3000);
+    }
+  });
+
+  restartBtn.addEventListener("click", async () => {
+    try {
+      setTunnelStatus("dot--warn", "awg-uplink: перезапуск");
+      await postJson("/api/tunnel/restart", {});
+      toast("awg-uplink перезапущен.", "ok");
+      await refreshTunnelStatus(state);
+    } catch (e) {
+      setTunnelStatus("dot--bad", "awg-uplink: ошибка перезапуска");
+      toast(`Ошибка перезапуска: ${e?.message || "unknown"}`, "error", 2800);
+    }
   });
 
   render();
@@ -232,16 +264,45 @@ async function fetchJson(path) {
   return await res.json();
 }
 
-async function refreshTunnelStatus() {
+function setRoutingAvailability(enabled) {
+  const root = $("routingModes");
+  for (const btn of root.querySelectorAll(".routing-mode-btn")) {
+    btn.disabled = !enabled;
+  }
+  if (!enabled) {
+    setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
+  }
+}
+
+function setRouteModeStatus(mode, applied = true) {
+  if (!applied) {
+    setStatusById("routingModeStatus", "dot--warn", `не применено: ${routeModeLabel(mode)}`);
+    return;
+  }
+  if (mode === "tunnel") {
+    setStatusById("routingModeStatus", "dot--ok", "применено: весь трафик в туннель");
+  } else if (mode === "egress") {
+    setStatusById("routingModeStatus", "dot--ok", "применено: маршрутизируем в egress");
+  } else {
+    setStatusById("routingModeStatus", "dot--warn", `не применено: ${routeModeLabel(mode)}`);
+  }
+}
+
+async function refreshTunnelStatus(state = null) {
   try {
     const st = await fetchJson("/api/status/awg-uplink");
     if (!st) return;
-    if (!st.exists) return setTunnelStatus("dot--bad", "awg-uplink: не найден");
+    const up = Boolean(st.exists && st.state === "UP");
+    if (state) state.tunnelUp = up;
+    setRoutingAvailability(up);
+    if (!st.exists) return setTunnelStatus("dot--bad", st.configured ? "awg-uplink: DOWN" : "awg-uplink: не настроен");
     const op = st.operstate && st.operstate !== "UNKNOWN" ? st.operstate : "";
     if (st.state === "UP") return setTunnelStatus("dot--ok", `awg-uplink: UP${op ? ` (${op})` : ""}`);
     const base = st.state || "UNKNOWN";
     return setTunnelStatus("dot--warn", `awg-uplink: ${base}${op ? ` (${op})` : ""}`);
   } catch {
+    if (state) state.tunnelUp = false;
+    setRoutingAvailability(false);
     setTunnelStatus("dot--unknown", "awg-uplink: ошибка статуса");
   }
 }
@@ -618,6 +679,7 @@ async function initNetworkForm(state) {
     }
     if (cfg.ingress_ip) $("ingressIp").value = cfg.ingress_ip;
     if (typeof cfg.ingress_gw === "string") $("ingressGw").value = cfg.ingress_gw;
+    if (cfg.route_mode) state.routeMode = cfg.route_mode;
     refreshInterfaceStatuses(saved && saved.runtime ? saved.runtime : null);
   } catch {
     // no saved routing config yet
@@ -657,6 +719,7 @@ function initInterfaceSave() {
       ingress_dev: $("ingressDev").value,
       ingress_ip: $("ingressIp").value,
       ingress_gw: $("ingressGw").value.trim(),
+      route_mode: window.__awgState && window.__awgState.routeMode ? window.__awgState.routeMode : "egress",
     };
     if (!body.egress_dev || !body.egress_ip) {
       toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
@@ -903,17 +966,40 @@ function initRoutingPanel(state) {
     geoListModalOverlay.classList.add("hidden");
   }
 
-  const applyMode = (mode) => {
-    state.routeMode = mode;
-    for (const btn of root.querySelectorAll(".routing-mode-btn")) {
-      const active = btn.getAttribute("data-route-mode") === mode;
-      btn.classList.toggle("is-active", active);
+  const applyMode = async (mode, options = {}) => {
+    if (!state.tunnelUp) {
+      setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
+      return;
     }
-    setStatusById("routingModeStatus", "dot--warn", `не применено: ${routeModeLabel(mode)}`);
-    refreshGeoUi();
+    if (mode === "georouting") {
+      state.routeMode = mode;
+      for (const btn of root.querySelectorAll(".routing-mode-btn")) {
+        const active = btn.getAttribute("data-route-mode") === mode;
+        btn.classList.toggle("is-active", active);
+      }
+      setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+      refreshGeoUi();
+      return;
+    }
+    setRouteModeStatus(mode, false);
+    try {
+      const res = await postJson("/api/net/routing/mode", { route_mode: mode });
+      state.routeMode = (res && res.config && res.config.route_mode) || mode;
+      for (const btn of root.querySelectorAll(".routing-mode-btn")) {
+        const active = btn.getAttribute("data-route-mode") === state.routeMode;
+        btn.classList.toggle("is-active", active);
+      }
+      setRouteModeStatus(state.routeMode, true);
+      if (!options.silent) toast(state.routeMode === "tunnel" ? "Режим туннеля применен." : "Режим egress применен.", "ok");
+      refreshGeoUi();
+    } catch (e) {
+      setRouteModeStatus(mode, false);
+      if (!options.silent) toast(`Ошибка применения режима: ${e?.message || "unknown"}`, "error", 2800);
+    }
   };
 
   root.addEventListener("click", (ev) => {
+    if (!state.tunnelUp) return;
     const t = ev.target;
     if (!(t instanceof HTMLElement)) return;
     const btn = t.closest(".routing-mode-btn");
@@ -1008,7 +1094,19 @@ function initRoutingPanel(state) {
     }
   });
 
-  applyMode(state.routeMode || "egress");
+  const startMode = state.routeMode || "egress";
+  for (const btn of root.querySelectorAll(".routing-mode-btn")) {
+    const active = btn.getAttribute("data-route-mode") === startMode;
+    btn.classList.toggle("is-active", active);
+  }
+  if (!state.tunnelUp) {
+    setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
+  } else if (startMode === "georouting") {
+    setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+  } else {
+    setRouteModeStatus(startMode, true);
+  }
+  refreshGeoUi();
 }
 
 async function logout() {
@@ -1023,6 +1121,7 @@ async function main() {
     prevCpu: null,
     prevNet: null,
     mtproto: null,
+    tunnelUp: false,
     routeMode: "egress",
     geo: {
       target: "tunnel",
@@ -1051,6 +1150,7 @@ async function main() {
       lists: { ipInclude: "", ipExclude: "", domainInclude: "", domainExclude: "" },
     },
   };
+  window.__awgState = state;
 
   const authEnabled = Boolean(window.__AWG_AUTH_ENABLED__);
   if (authEnabled) {
@@ -1060,16 +1160,16 @@ async function main() {
   }
 
   initImportModal(state);
-  initRoutingPanel(state);
   initMtprotoPanel(state);
   initInterfaceSave();
   initNetplanEditor();
 
   await initNetworkForm(state);
-  await refreshTunnelStatus();
+  await refreshTunnelStatus(state);
+  initRoutingPanel(state);
   await refreshSystemMetrics(state);
   await refreshMtprotoState(state);
-  setInterval(refreshTunnelStatus, 5000);
+  setInterval(() => refreshTunnelStatus(state), 5000);
   setInterval(() => refreshSystemMetrics(state), 2000);
   setInterval(() => refreshMtprotoState(state), 5000);
 }

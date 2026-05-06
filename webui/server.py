@@ -70,6 +70,106 @@ def _write_text(path: str, data: str):
     os.replace(tmp, path)
 
 
+def _sanitize_tunnel_config(cfg_text: str) -> str:
+    lines = cfg_text.splitlines()
+    out: list[str] = []
+    in_iface = False
+    saw_iface = False
+    table_written = False
+    table_pending = False
+
+    def flush_table_if_needed():
+        nonlocal table_pending, table_written
+        if table_pending and not table_written:
+            out.append("Table = off")
+            table_written = True
+            table_pending = False
+
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            flush_table_if_needed()
+            sec = s[1:-1].strip().lower()
+            in_iface = sec == "interface"
+            if in_iface:
+                saw_iface = True
+                table_written = False
+                table_pending = True
+            out.append(line)
+            continue
+
+        if in_iface:
+            # Remove DNS lines and all routing hooks for this stage.
+            if re.match(r"^\s*DNS\s*=", line):
+                continue
+            if re.match(r"^\s*PostUp\s*=", line) or re.match(r"^\s*PostDown\s*=", line):
+                continue
+            # Remove empty Amnezia I* keys.
+            m_i = re.match(r"^\s*I[0-9]+\s*=\s*(.*)$", line)
+            if m_i and not m_i.group(1).strip():
+                continue
+            # Force table off and avoid duplicates.
+            if re.match(r"^\s*Table\s*=", line):
+                if not table_written:
+                    out.append("Table = off")
+                    table_written = True
+                table_pending = False
+                continue
+
+        if re.match(r"^\s*AllowedIPs\s*=", line):
+            pfx = re.match(r"^(\s*AllowedIPs\s*=\s*)(.*)$", line)
+            if pfx:
+                vals = [x.strip() for x in pfx.group(2).split(",")]
+                vals = [x for x in vals if x and ":" not in x]
+                if not vals:
+                    vals = ["0.0.0.0/0"]
+                line = pfx.group(1) + ", ".join(vals)
+
+        # Insert Table=off before first non-empty key inside [Interface] if missing.
+        if in_iface and table_pending and s and not s.startswith("#"):
+            out.append("Table = off")
+            table_written = True
+            table_pending = False
+        out.append(line)
+
+    flush_table_if_needed()
+    if not saw_iface:
+        raise ValueError("invalid config: [Interface] section not found")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _validate_tunnel_config(cfg_text: str) -> tuple[bool, str]:
+    try:
+        sanitized = _sanitize_tunnel_config(cfg_text)
+    except Exception as e:
+        return False, str(e)
+
+    if "[Interface]" not in sanitized:
+        return False, "missing [Interface] section"
+    if not re.search(r"^\s*PrivateKey\s*=\s*\S+", sanitized, flags=re.M):
+        return False, "missing Interface.PrivateKey"
+    if not re.search(r"^\s*\[Peer\]\s*$", sanitized, flags=re.M):
+        return False, "missing [Peer] section"
+    if not re.search(r"^\s*PublicKey\s*=\s*\S+", sanitized, flags=re.M):
+        return False, "missing Peer.PublicKey"
+
+    # Validate private key format via awg pubkey when available.
+    m = re.search(r"^\s*PrivateKey\s*=\s*(\S+)\s*$", sanitized, flags=re.M)
+    if m and shutil.which("awg"):
+        key = m.group(1).strip()
+        p = subprocess.run(
+            ["awg", "pubkey"],
+            input=f"{key}\n",
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        if p.returncode != 0:
+            return False, f"invalid PrivateKey: {(p.stderr or p.stdout).strip()}"
+    return True, ""
+
+
 def _ip_in_subnet(ip: str, cidr: str) -> bool:
     try:
         return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
@@ -405,6 +505,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ingress_dev = str(cfg.get("ingress_dev", "")).strip()
         ingress_ip = str(cfg.get("ingress_ip", "")).strip()
         ingress_gw = str(cfg.get("ingress_gw", "")).strip()
+        route_mode = str(cfg.get("route_mode", "egress") or "egress").strip().lower()
+        if route_mode not in ("egress", "tunnel"):
+            route_mode = "egress"
 
         ingress_enabled = bool(
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
@@ -420,7 +523,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             f"INGRESS_IP={shlex.quote(ingress_ip)}",
             f"INGRESS_GW={shlex.quote(ingress_gw)}",
             "INGRESS_TABLE=201",
-            "INGRESS_RULE_PRIO=110",
+            "INGRESS_RULE_PRIO=81",
+            "EGRESS_TABLE=202",
+            "EGRESS_RULE_PRIO=80",
+            f"ROUTE_MODE={shlex.quote(route_mode)}",
             "",
         ]
         _mkdir(self._webui_cfg_dir())
@@ -466,37 +572,48 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ingress_enabled = bool(
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
         )
+        route_mode = str(cfg.get("route_mode", "egress") or "egress").strip().lower()
+        if route_mode not in ("egress", "tunnel"):
+            route_mode = "egress"
 
         egress_gw = str(cfg.get("egress_gw", "")).strip()
         e_rc, e_out, _ = _run(["ip", "-4", "route", "show", "default"], timeout=2.0)
         default_lines = [ln.strip() for ln in (e_out or "").splitlines() if ln.strip()] if e_rc == 0 else []
         default_line = default_lines[0] if default_lines else ""
         egress_ok = False
-        for ln in default_lines:
-            if f"dev {egress_dev}" not in ln:
-                continue
-            if egress_gw and f"via {egress_gw}" not in ln:
-                continue
-            egress_ok = True
-            break
-        # Some kernels/routes do not show explicit "src" in default route output,
-        # so "dev + (optional via)" is treated as applied state.
+        if route_mode == "tunnel":
+            # In tunnel mode, system default must point to awg-uplink.
+            egress_ok = any("dev awg-uplink" in ln for ln in default_lines)
+        else:
+            for ln in default_lines:
+                if f"dev {egress_dev}" not in ln:
+                    continue
+                if egress_gw and f"via {egress_gw}" not in ln:
+                    continue
+                egress_ok = True
+                break
+            # Some kernels/routes do not show explicit "src" in default route output,
+            # so "dev + (optional via)" is treated as applied state.
 
-        i_rc, i_out, _ = _run(
-            ["ip", "-4", "rule", "show", "priority", "110"],
-            timeout=2.0,
-        )
+        i_rc, i_out, _ = _run(["ip", "-4", "rule", "show"], timeout=2.0)
         ingress_rule_ok = bool(i_rc == 0 and ingress_enabled and ingress_ip and ingress_ip in i_out and "lookup 201" in i_out)
         if not ingress_enabled:
             ingress_rule_ok = True
 
+        tunnel_rule_ok = True
+        if route_mode == "tunnel":
+            t_rc, t_out, _ = _run(["ip", "-4", "rule", "show", "priority", "90"], timeout=2.0)
+            tunnel_rule_ok = bool(t_rc == 0 and "lookup 203" in (t_out or ""))
+
         svc = self._iface_service_state()
-        applied = bool(svc.get("ok") and egress_ok and ingress_rule_ok)
+        applied = bool(svc.get("ok") and egress_ok and ingress_rule_ok and tunnel_rule_ok)
         return {
             "applied": applied,
             "egress_ok": egress_ok,
             "ingress_enabled": ingress_enabled,
             "ingress_ok": ingress_rule_ok,
+            "route_mode": route_mode,
+            "tunnel_rule_ok": tunnel_rule_ok,
             "service": svc,
             "default_route": default_line,
         }
@@ -619,15 +736,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return self._send_json(200, {"ifaces": ifaces})
 
     def _api_status_awg(self):
+        conf_path = "/etc/amnezia/amneziawg/awg-uplink.conf"
         rc, out, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
         if rc != 0:
-            return self._send_json(200, {"exists": False})
+            return self._send_json(200, {"exists": False, "configured": Path(conf_path).exists()})
         try:
             items = json.loads(out)
         except Exception:
             items = []
         if not items:
-            return self._send_json(200, {"exists": False})
+            return self._send_json(200, {"exists": False, "configured": Path(conf_path).exists()})
         it = items[0]
         flags = it.get("flags", []) or []
         state = "UP" if "UP" in flags else "DOWN"
@@ -635,6 +753,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             200,
             {
                 "exists": True,
+                "configured": Path(conf_path).exists(),
                 "state": state,
                 "operstate": it.get("operstate"),
                 "flags": flags,
@@ -1200,6 +1319,18 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if sp == "/api/net/routing/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
+            rc_up, out_up, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
+            tunnel_up = False
+            if rc_up == 0:
+                try:
+                    items = json.loads(out_up)
+                    if items:
+                        flags = items[0].get("flags", []) or []
+                        tunnel_up = "UP" in flags
+                except Exception:
+                    tunnel_up = False
+            if not tunnel_up:
+                return self._send_text(409, "routing unavailable: awg-uplink is not UP")
             body = self._read_json_body()
             cfg = {
                 "egress_dev": str(body.get("egress_dev", "")).strip(),
@@ -1208,6 +1339,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ingress_dev": str(body.get("ingress_dev", "")).strip(),
                 "ingress_ip": str(body.get("ingress_ip", "")).strip(),
                 "ingress_gw": str(body.get("ingress_gw", "")).strip(),
+                "route_mode": str(body.get("route_mode", "")).strip().lower() or "egress",
                 "updated_at": int(time.time()),
             }
             ok, err = self._validate_iface_cfg(cfg)
@@ -1246,6 +1378,42 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 },
             )
 
+        if sp == "/api/net/routing/mode":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            mode = str(body.get("route_mode", "")).strip().lower()
+            if mode not in ("egress", "tunnel"):
+                return self._send_text(400, "route_mode must be egress|tunnel")
+            if mode == "tunnel":
+                rc_up, out_up, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
+                tunnel_up = False
+                if rc_up == 0:
+                    try:
+                        items = json.loads(out_up)
+                        if items:
+                            flags = items[0].get("flags", []) or []
+                            tunnel_up = "UP" in flags
+                    except Exception:
+                        tunnel_up = False
+                if not tunnel_up:
+                    return self._send_text(409, "awg-uplink tunnel is not UP")
+            cfg = self._load_iface_config()
+            if not cfg:
+                return self._send_text(400, "interface config is empty")
+            cfg["route_mode"] = mode
+            cfg["updated_at"] = int(time.time())
+            try:
+                self._store_iface_config(cfg)
+                self._write_iface_env(cfg)
+                self._apply_iface_routing()
+            except Exception as e:
+                return self._send_text(500, f"apply failed: {e}")
+            runtime = self._routing_runtime_status(cfg)
+            if not runtime.get("applied"):
+                return self._send_json(500, {"ok": False, "error": "routing not applied", "runtime": runtime})
+            return self._send_json(200, {"ok": True, "config": cfg, "runtime": runtime})
+
         if sp == "/api/netplan/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
@@ -1279,6 +1447,51 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if not ok:
                 return self._send_text(400, f"netplan syntax error:\n{err}")
             return self._send_json(200, {"ok": True, "path": pth})
+
+        if sp == "/api/tunnel/import":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            cfg_text = str(body.get("config_text", ""))
+            if not cfg_text.strip():
+                return self._send_text(400, "config_text is empty")
+            try:
+                ok, verr = _validate_tunnel_config(cfg_text)
+                if not ok:
+                    return self._send_text(400, f"tunnel config validation failed: {verr}")
+                sanitized = _sanitize_tunnel_config(cfg_text)
+                conf_path = Path("/etc/amnezia/amneziawg/awg-uplink.conf")
+                _mkdir(str(conf_path.parent))
+                _write_text(str(conf_path), sanitized)
+                os.chmod(str(conf_path), 0o600)
+                _run(["systemctl", "daemon-reload"], timeout=3.0)
+                _run(["systemctl", "enable", "awg-quick@awg-uplink.service"], timeout=3.0)
+                rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=10.0)
+                if rc != 0:
+                    return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
+            except Exception as e:
+                return self._send_text(500, f"tunnel import failed: {e}")
+            return self._send_json(200, {"ok": True, "path": "/etc/amnezia/amneziawg/awg-uplink.conf"})
+
+        if sp == "/api/tunnel/validate":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            cfg_text = str(body.get("config_text", ""))
+            if not cfg_text.strip():
+                return self._send_text(400, "config_text is empty")
+            ok, verr = _validate_tunnel_config(cfg_text)
+            if not ok:
+                return self._send_text(400, f"tunnel config validation failed: {verr}")
+            return self._send_json(200, {"ok": True})
+
+        if sp == "/api/tunnel/restart":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=12.0)
+            if rc != 0:
+                return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
+            return self._send_json(200, {"ok": True})
 
         if sp == "/api/mtproto/config/save":
             if self._auth_enabled and not self._session_user():

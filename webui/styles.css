@@ -333,6 +333,12 @@ body::before {
   .interface-grid .interface-tunnel-card {
     grid-column: 1 / -1;
   }
+
+  .interface-grid .interface-actions-inline {
+    grid-column: 1 / -1;
+    margin-top: 0;
+    padding-top: 0;
+  }
 }
 
 .card {
@@ -473,7 +479,23 @@ select:disabled option {
   display: flex;
   gap: 10px;
   align-items: center;
-  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.file-left {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.file-right {
+  display: flex;
+  margin-left: auto;
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 
 .file-input-hidden {
@@ -532,17 +554,6 @@ select:disabled option {
 
   .card-head {
     flex-wrap: wrap;
-  }
-
-  .file {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .file .btn {
-    width: 100%;
-    white-space: normal;
-    text-align: left;
   }
 
   .mtp-user-item {
@@ -636,6 +647,11 @@ select:disabled option {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.interface-grid .interface-actions-inline {
+  grid-column: 1 / -1;
+  margin-top: 2px;
 }
 
 .actions-left {
@@ -836,6 +852,7 @@ select:disabled option {
   .mt-health-row:last-child {
     border-bottom: 0;
   }
+
 }
 
 .mtp-user-sessions {
@@ -1166,6 +1183,45 @@ textarea {
 }
 
 @media (max-width: 900px), (hover: none) and (pointer: coarse) {
+  .file {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .file-left,
+  .file-right {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    margin-left: 0 !important;
+  }
+
+  .file .btn {
+    width: 100% !important;
+    white-space: normal !important;
+    text-align: left !important;
+  }
+
+  .actions {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .actions-left {
+    width: 100% !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  #netplanOpenBtn {
+    margin-left: 0 !important;
+    width: 100% !important;
+    text-align: center !important;
+  }
+
   .mtp-user-item {
     grid-template-columns: 1fr !important;
     gap: 8px !important;
@@ -1207,6 +1263,37 @@ textarea {
     white-space: normal !important;
     text-align: center !important;
     padding: 8px 10px !important;
+  }
+}
+
+@media (min-width: 721px) {
+  .file {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+  }
+
+  .file-left {
+    width: auto !important;
+    flex: 1 1 auto !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .file-right {
+    width: auto !important;
+    flex: 0 0 auto !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    margin-left: auto !important;
+  }
+
+  .file .btn {
+    width: auto !important;
+    white-space: nowrap !important;
+    text-align: center !important;
   }
 }
 
