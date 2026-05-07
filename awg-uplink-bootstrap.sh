@@ -703,7 +703,7 @@ PY
 	log "MTProto: в config.toml включён drs = true ([censorship])"
 }
 
-# mtbuddy вызывает groupadd/useradd; предварительно создаём системные группу/пользователя mtproto (см. lib/awg-webui-mtproto-bootstrap.sh).
+# mtbuddy вызывает groupadd/useradd; предварительно создаём системные группу/пользователя mtproto.
 ensure_mtproto_system_ids() {
 	if getent group mtproto >/dev/null 2>&1; then
 		:
