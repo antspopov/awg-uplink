@@ -4,7 +4,7 @@ set -euo pipefail
 CFG_ENV="${AWG_WEBUI_IFACE_ENV:-/etc/awg-uplink-webui/interfaces.env}"
 STATE_FILE="/run/awg-webui-ifaces.state"
 INGRESS_NAT_COMMENT="awg-webui-tunnel-ingress-docker-snat"
-# См. lib/awg-uplink-policy.sh: nft mangle после wg-quick, fwmark для ответов Docker-VPN через uplink-table.
+# nft mangle после wg-quick, fwmark для ответов Docker-VPN через uplink-table.
 NFT_PUBUDP_TABLE=${NFT_PUBUDP_TABLE:-awg_webui_pubudp}
 NFT_PUBUDP_CHAIN=${NFT_PUBUDP_CHAIN:-prerouting}
 DOCKER_MARK_TUNNEL_PRIO=${DOCKER_MARK_TUNNEL_PRIO:-71}
@@ -56,7 +56,7 @@ rp_filter_read() {
   cat "/proc/sys/net/ipv4/conf/${d}/rp_filter"
 }
 
-# Default route через туннель ломает strict RPF для DNAT Docker (см. awg-uplink-policy.sh RP_LOOSE=2).
+# Default route через туннель ломает strict RPF для DNAT Docker (используем loose rp_filter=2).
 rp_filter_tunnel_prepare() {
   RP_RESTORE_EGRESS_VAL=""
   RP_RESTORE_INGRESS_VAL=""
@@ -246,7 +246,7 @@ nft_pubudp_setup() {
     iifname "$br" udp sport "$port" meta mark set "$mark_hex" comment "awg-webui-dockerudp"
 }
 
-# fwmark → uplink table must be before \"from <docker CIDR>\" rules (порядок как в awg-uplink-policy.sh).
+# fwmark → uplink table must be before \"from <docker CIDR>\" rules.
 setup_docker_udp_fwmark_tunnel() {
   local uplink_tab=$1 mark_dec=$2 prio=$3
   [[ -n "${DOCKER_MARK_BR:-}" && -n "${DOCKER_MARK_DPORT:-}" ]] || return 0
@@ -526,7 +526,7 @@ apply_cfg() {
       ip -4 route replace default dev awg-uplink table "$TUN_TABLE"
     fi
     [[ -n $elink ]] && ip -4 route replace "$elink" dev "$EGRESS_DEV" table "$TUN_TABLE"
-    # Docker / bridge: как awg-uplink-policy.sh — nft mark + fwmark правило ПЕРЕД from <CIDR> (иначе mark не влияет).
+    # Docker / bridge: nft mark + fwmark правило ПЕРЕД from <CIDR> (иначе mark не влияет).
     DOCKER_TUNNEL_MARK_DEC=""
     DOCKER_TUNNEL_MARK_PRIO=""
     DOCKER_TUNNEL_NFT_ACTIVE=0

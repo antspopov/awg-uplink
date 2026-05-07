@@ -1063,7 +1063,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "EGRESS_TABLE=202",
             "EGRESS_RULE_PRIO=80",
             f"ROUTE_MODE={shlex.quote(apply_mode)}",
-            "# Tunnel + Docker-VPN: optional (see lib/awg-uplink-policy.sh / awg-webui-iface-routing-apply.sh)",
+            "# Tunnel + Docker-VPN: optional knobs for awg-webui-iface-routing-apply.sh",
             "# DOCKER_FORCE_PORT=39983",
             "# DOCKER_MARK_IN=amn0",
             "",
