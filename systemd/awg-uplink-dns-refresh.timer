@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic DNS (dnsmasq/dnscrypt) list refresh
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=6h
+AccuracySec=5min
+Persistent=true
+Unit=awg-uplink-dns-refresh.service
+
+[Install]
+WantedBy=timers.target

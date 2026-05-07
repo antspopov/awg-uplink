@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply nft ingress filters for egress/ingress/awg-uplink
+After=network-online.target awg-webui-ifaces.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+ExecStart=/usr/local/sbin/awg-uplink-firewall-apply.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

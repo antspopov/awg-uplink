@@ -1,0 +1,15 @@
+[Unit]
+Description=AWG Uplink: keep Amnezia Unbound forwarding root zone to host dnsmasq
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+Environment=AWG_AMNEZIA_DNS_WATCH_INTERVAL=30
+ExecStart=/usr/local/sbin/awg-uplink-amnezia-dns-watch.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply dnsmasq/dnscrypt from AWG Web UI and geo domain lists
+After=network-online.target dnsmasq.service dnscrypt-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+ExecStart=/usr/local/sbin/awg-uplink-dns-refresh.py

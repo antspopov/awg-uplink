@@ -1,0 +1,22 @@
+[Unit]
+Description=DNSCrypt client proxy (awg-uplink: без socket activation, listen_addresses в /etc/dnscrypt-proxy/dnscrypt-proxy.toml)
+Documentation=https://github.com/DNSCrypt/dnscrypt-proxy/wiki
+After=network-online.target
+Before=nss-lookup.target
+Wants=nss-lookup.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnscrypt-proxy -config /etc/dnscrypt-proxy/dnscrypt-proxy.toml
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+User=_dnscrypt-proxy
+CacheDirectory=dnscrypt-proxy
+LogsDirectory=dnscrypt-proxy
+RuntimeDirectory=dnscrypt-proxy
+
+[Install]
+WantedBy=multi-user.target

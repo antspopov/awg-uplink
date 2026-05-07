@@ -426,6 +426,33 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         expected = _sha256_hex(f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}")
         return hmac.compare_digest(expected, response)
 
+    def _default_iface_firewall(self) -> dict:
+        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 443, 8080]}
+
+    def _iface_firewall_for_response(self, cfg: dict) -> dict:
+        base = self._default_iface_firewall()
+        fw = cfg.get("firewall") if isinstance(cfg.get("firewall"), dict) else {}
+        eg = fw.get("egress_tcp_ports")
+        ing = fw.get("ingress_tcp_ports")
+        out = dict(base)
+        if isinstance(eg, list) and eg and all(isinstance(x, int) and 1 <= x <= 65535 for x in eg):
+            out["egress_tcp_ports"] = sorted(set(eg))
+        if isinstance(ing, list) and ing and all(isinstance(x, int) and 1 <= x <= 65535 for x in ing):
+            out["ingress_tcp_ports"] = sorted(set(ing))
+        return out
+
+    def _merge_iface_firewall_save(self, prev: dict, fw_body) -> dict:
+        cur = self._iface_firewall_for_response(prev if isinstance(prev, dict) else {})
+        if not isinstance(fw_body, dict):
+            return cur
+        eg = self._parse_dns_tcp_ports(fw_body.get("egress_tcp_ports"))
+        ing = self._parse_dns_tcp_ports(fw_body.get("ingress_tcp_ports"))
+        if eg is not None:
+            cur["egress_tcp_ports"] = eg
+        if ing is not None:
+            cur["ingress_tcp_ports"] = ing
+        return cur
+
     def _webui_cfg_dir(self) -> str:
         return os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui")
 
@@ -437,6 +464,237 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 
     def _webui_geo_json(self) -> str:
         return str(Path(self._webui_cfg_dir()) / "georouting.json")
+
+    def _webui_dns_json(self) -> str:
+        return str(Path(self._webui_cfg_dir()) / "dns.json")
+
+    def _default_dns_cfg(self) -> dict:
+        return {
+            "upstream_servers": ["77.88.8.8", "77.88.8.1"],
+            "dnscrypt_server_names": ["cloudflare", "google"],
+            "domains_list_updated_at": None,
+            "amnezia_dns_watch_enabled": True,
+            "amnezia_dns_container": "amnezia-dns",
+            "amnezia_dns_network": "amnezia-dns-net",
+            "amnezia_dns_forward_ip": "",
+            "dns_transport_lock_enabled": False,
+        }
+
+    def _read_amnezia_dns_watch_state(self) -> dict:
+        p = Path("/var/lib/awg-uplink/amnezia-dns-watch.json")
+        if not p.exists():
+            return {}
+        try:
+            o = json.loads(p.read_text(encoding="utf-8"))
+            return o if isinstance(o, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _coerce_dns_bool(val) -> bool:
+        """Безопасное bool для dns.json / JSON API (избегаем bool('false') == True)."""
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return False
+        if isinstance(val, (int, float)):
+            return bool(int(val))
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                return True
+            if s in ("false", "0", "no", "off", ""):
+                return False
+        return False
+
+    def _load_dns_config(self) -> dict:
+        raw = _read_text(self._webui_dns_json(), "")
+        if not raw.strip():
+            return dict(self._default_dns_cfg())
+        try:
+            obj = json.loads(raw)
+            if not isinstance(obj, dict):
+                return dict(self._default_dns_cfg())
+            for key in ("amnezia_dns_watch_enabled", "dns_transport_lock_enabled"):
+                if key in obj:
+                    obj[key] = self._coerce_dns_bool(obj[key])
+            return obj
+        except Exception:
+            return dict(self._default_dns_cfg())
+
+    def _store_dns_config(self, cfg: dict):
+        _mkdir(self._webui_cfg_dir())
+        _write_text(self._webui_dns_json(), json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+
+    def _service_is_active(self, unit: str) -> bool:
+        rc, out, _ = _run(["systemctl", "is-active", unit], timeout=2.0)
+        return rc == 0 and (out or "").strip() == "active"
+
+    _MSG_AMNEZIA_DNS_MISSING = (
+        "Отсутствует сервис AmneziaDNS — установите его на сервер из приложения AmneziaVPN."
+    )
+
+    def _docker_container_running(self, name: str) -> bool:
+        n = (name or "").strip()
+        if not n:
+            return False
+        rc, out, _ = _run(["docker", "inspect", "-f", "{{.State.Running}}", n], timeout=6.0)
+        return rc == 0 and (out or "").strip().lower() == "true"
+
+    def _iface_with_geo(self, iface: dict | None) -> dict:
+        merged = dict(iface or {})
+        merged["geo"] = self._load_geo_config()
+        return merged
+
+    def _sync_dns_amnezia_if_domain_routing(self, iface: dict | None) -> None:
+        if not self._is_geo_domain_enabled(self._iface_with_geo(iface)):
+            return
+        dns = self._load_dns_config()
+        base = self._default_dns_cfg()
+        for k, v in base.items():
+            dns.setdefault(k, v)
+        dns["amnezia_dns_watch_enabled"] = True
+        self._store_dns_config(dns)
+
+    def _parse_dns_tcp_ports(self, val) -> list[int] | None:
+        if val is None:
+            return None
+        if isinstance(val, list):
+            out = []
+            for x in val:
+                try:
+                    n = int(x)
+                except Exception:
+                    continue
+                if 1 <= n <= 65535:
+                    out.append(n)
+            return sorted(set(out)) if out else None
+        if isinstance(val, str):
+            parts = re.split(r"[\s,;]+", val.strip())
+            out = []
+            for p in parts:
+                if not p:
+                    continue
+                try:
+                    n = int(p)
+                except Exception:
+                    continue
+                if 1 <= n <= 65535:
+                    out.append(n)
+            return sorted(set(out)) if out else None
+        return None
+
+    def _api_dns_config(self):
+        cfg = dict(self._load_dns_config())
+        cfg.pop("firewall", None)
+        base = self._default_dns_cfg()
+        for k, v in base.items():
+            cfg.setdefault(k, v)
+        ts = cfg.get("domains_list_updated_at")
+        try:
+            ts_int = int(ts) if ts is not None else None
+        except Exception:
+            ts_int = None
+        st = self._read_amnezia_dns_watch_state()
+        watch_svc = self._service_is_active("awg-uplink-amnezia-dns-watch.service")
+        iface = self._load_iface_config()
+        iwg = self._iface_with_geo(iface)
+        domain_lock = self._is_geo_domain_enabled(iwg)
+        container_name = str(cfg.get("amnezia_dns_container", "amnezia-dns") or "amnezia-dns").strip() or "amnezia-dns"
+        container_present = self._docker_container_running(container_name)
+        toggle_locked = (not container_present) or domain_lock
+        if domain_lock:
+            toggle_checked = True
+        elif not container_present:
+            toggle_checked = False
+        else:
+            toggle_checked = self._coerce_dns_bool(cfg.get("amnezia_dns_watch_enabled", True))
+        detail_ui = str(st.get("detail", "") or "")
+        if not container_present:
+            detail_ui = self._MSG_AMNEZIA_DNS_MISSING
+        tl_rc, _, _ = _run(["nft", "list", "table", "inet", "awg_uplink_dns_transport_lock"], timeout=2.0)
+        return self._send_json(
+            200,
+            {
+                "config": cfg,
+                "dnsmasq_active": self._service_is_active("dnsmasq.service"),
+                "dnscrypt_active": self._service_is_active("dnscrypt-proxy.service"),
+                "domains_list_updated_at": ts_int,
+                "config_dir": self._webui_cfg_dir(),
+                "dns_transport_lock": {
+                    "enabled": self._coerce_dns_bool(cfg.get("dns_transport_lock_enabled")),
+                    "nft_active": tl_rc == 0,
+                },
+                "amnezia_dns_watch": {
+                    "enabled": self._coerce_dns_bool(cfg.get("amnezia_dns_watch_enabled")),
+                    "service_active": watch_svc,
+                    "status": str(st.get("status", "") or "unknown"),
+                    "detail": detail_ui,
+                    "forward_ip": str(st.get("forward_ip", "") or ""),
+                    "container": str(st.get("container", "") or ""),
+                    "last_run_unix": st.get("last_run_unix"),
+                    "last_patch_unix": st.get("last_patch_unix"),
+                    "container_present": container_present,
+                    "domain_routing_requires": domain_lock,
+                    "toggle_locked": toggle_locked,
+                    "toggle_checked": toggle_checked,
+                },
+            },
+        )
+
+    def _api_dns_save(self, body: dict):
+        cfg = self._load_dns_config()
+        base = self._default_dns_cfg()
+        for k, v in base.items():
+            cfg.setdefault(k, v)
+
+        up = body.get("upstream_servers")
+        if isinstance(up, str):
+            cfg["upstream_servers"] = [ln.strip() for ln in up.splitlines() if ln.strip()]
+        elif isinstance(up, list):
+            cfg["upstream_servers"] = [str(x).strip() for x in up if str(x).strip()]
+
+        dc = body.get("dnscrypt_server_names")
+        if isinstance(dc, str):
+            cfg["dnscrypt_server_names"] = [ln.strip() for ln in dc.splitlines() if ln.strip()]
+        elif isinstance(dc, list):
+            cfg["dnscrypt_server_names"] = [str(x).strip() for x in dc if str(x).strip()]
+
+        iface = self._load_iface_config()
+        iwg = self._iface_with_geo(iface)
+        domain_lock = self._is_geo_domain_enabled(iwg)
+        container_name = str(cfg.get("amnezia_dns_container", "amnezia-dns") or "amnezia-dns").strip() or "amnezia-dns"
+        container_present = self._docker_container_running(container_name)
+        if domain_lock:
+            cfg["amnezia_dns_watch_enabled"] = True
+        elif not container_present:
+            cfg["amnezia_dns_watch_enabled"] = False
+        else:
+            if "amnezia_dns_watch_enabled" in body:
+                cfg["amnezia_dns_watch_enabled"] = self._coerce_dns_bool(body.get("amnezia_dns_watch_enabled"))
+
+        if "dns_transport_lock_enabled" in body:
+            cfg["dns_transport_lock_enabled"] = self._coerce_dns_bool(body.get("dns_transport_lock_enabled"))
+
+        cfg.pop("firewall", None)
+        self._store_dns_config(cfg)
+        _run(["systemctl", "daemon-reload"], timeout=3.0)
+        _run(["systemctl", "enable", "awg-uplink-dns-refresh.timer"], timeout=3.0)
+        _run(["systemctl", "start", "awg-uplink-dns-refresh.timer"], timeout=3.0)
+        rc, out, err = _run(["systemctl", "start", "awg-uplink-dns-refresh.service"], timeout=180.0)
+        if rc != 0:
+            raise RuntimeError((err or out or "awg-uplink-dns-refresh.service failed").strip())
+        _run(["systemctl", "enable", "awg-uplink-firewall.service"], timeout=3.0)
+        _run(["systemctl", "start", "awg-uplink-firewall.service"], timeout=30.0)
+        _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
+        _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
+        _run(["systemctl", "enable", "awg-uplink-amnezia-dns-watch.service"], timeout=3.0)
+        _run(["systemctl", "restart", "awg-uplink-amnezia-dns-watch.service"], timeout=20.0)
+        _run(
+            ["python3", "/usr/local/sbin/awg-uplink-amnezia-dns-watch.py", "--once"],
+            timeout=45.0,
+        )
+        return self._api_dns_config()
 
     def _normalize_geo_entry(self, item) -> dict:
         if isinstance(item, str):
@@ -516,6 +774,28 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _repo_root(self) -> Path:
         # webui/server.py lives under <repo>/webui/server.py
         return Path(__file__).resolve().parent.parent
+
+    def _runtime_src_root(self) -> Path:
+        """Каталог с lib/ и systemd/ (после bootstrap — /opt/awg-uplink).
+
+        Если webui запущен из другого пути, но полное дерево лежит в /opt/awg-uplink,
+        берём оттуда же, что и awg-webui-iface-routing-apply в bootstrap."""
+        candidates = (
+            self._repo_root(),
+            Path("/opt/awg-uplink"),
+            Path("/root/awg-uplink"),
+        )
+        for base in candidates:
+            try:
+                b = base.resolve()
+            except OSError:
+                continue
+            if not (b / "lib" / "awg-uplink-dns-refresh.py").exists():
+                continue
+            if not (b / "systemd" / "awg-uplink-dns-refresh.service").exists():
+                continue
+            return b
+        return self._repo_root().resolve()
 
     def _iface_service_state(self) -> dict:
         name = "awg-webui-ifaces.service"
@@ -641,44 +921,32 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return bool(geo.get("domainMode", False))
 
     def _install_iface_runtime(self):
-        repo_root = self._repo_root()
-        candidates = [
-            repo_root,
-            Path("/opt/awg-uplink"),
-            Path("/root/awg-uplink"),
-        ]
-        script_src = ""
-        unit_src = ""
-        for base in candidates:
-            s = base / "lib" / "awg-webui-iface-routing-apply.sh"
-            u = base / "systemd" / "awg-webui-ifaces.service"
-            if s.exists() and u.exists():
-                script_src = str(s)
-                unit_src = str(u)
-                break
+        root = self._runtime_src_root()
+        script_src = root / "lib" / "awg-webui-iface-routing-apply.sh"
+        unit_src = root / "systemd" / "awg-webui-ifaces.service"
         script_dst = "/usr/local/sbin/awg-webui-iface-routing-apply.sh"
         unit_dst = "/etc/systemd/system/awg-webui-ifaces.service"
-        if not script_src or not unit_src:
+        if not script_src.exists() or not unit_src.exists():
             raise RuntimeError("webui routing runtime files are missing (lib/systemd)")
-        shutil.copyfile(script_src, script_dst)
+        shutil.copyfile(str(script_src), script_dst)
         os.chmod(script_dst, 0o755)
-        shutil.copyfile(unit_src, unit_dst)
-        geo_ip_script_src = str(repo_root / "lib" / "awg-uplink-geo-ip-refresh.py")
+        shutil.copyfile(str(unit_src), unit_dst)
+        geo_ip_script_src = str(root / "lib" / "awg-uplink-geo-ip-refresh.py")
         geo_ip_script_dst = "/usr/local/sbin/awg-uplink-geo-ip-refresh.py"
-        geo_ip_service_src = str(repo_root / "systemd" / "awg-uplink-geo-ip-refresh.service")
-        geo_ip_timer_src = str(repo_root / "systemd" / "awg-uplink-geo-ip-refresh.timer")
+        geo_ip_service_src = str(root / "systemd" / "awg-uplink-geo-ip-refresh.service")
+        geo_ip_timer_src = str(root / "systemd" / "awg-uplink-geo-ip-refresh.timer")
         if not Path(geo_ip_script_src).exists() or not Path(geo_ip_service_src).exists() or not Path(geo_ip_timer_src).exists():
             raise RuntimeError("geo-ip runtime files are missing (lib/systemd)")
         shutil.copyfile(geo_ip_script_src, geo_ip_script_dst)
         os.chmod(geo_ip_script_dst, 0o755)
         shutil.copyfile(geo_ip_service_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.service")
         shutil.copyfile(geo_ip_timer_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.timer")
-        geo_domain_script_src = str(repo_root / "lib" / "awg-uplink-geo-domain-refresh.py")
+        geo_domain_script_src = str(root / "lib" / "awg-uplink-geo-domain-refresh.py")
         geo_domain_script_dst = "/usr/local/sbin/awg-uplink-geo-domain-refresh.py"
-        geo_domain_service_src = str(repo_root / "systemd" / "awg-uplink-geo-domain-refresh.service")
-        geo_domain_timer_src = str(repo_root / "systemd" / "awg-uplink-geo-domain-refresh.timer")
-        geo_domain_rotate_svc = str(repo_root / "systemd" / "awg-uplink-geo-domain-nft-rotate.service")
-        geo_domain_rotate_tmr = str(repo_root / "systemd" / "awg-uplink-geo-domain-nft-rotate.timer")
+        geo_domain_service_src = str(root / "systemd" / "awg-uplink-geo-domain-refresh.service")
+        geo_domain_timer_src = str(root / "systemd" / "awg-uplink-geo-domain-refresh.timer")
+        geo_domain_rotate_svc = str(root / "systemd" / "awg-uplink-geo-domain-nft-rotate.service")
+        geo_domain_rotate_tmr = str(root / "systemd" / "awg-uplink-geo-domain-nft-rotate.timer")
         if (
             not Path(geo_domain_script_src).exists()
             or not Path(geo_domain_service_src).exists()
@@ -693,6 +961,50 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         shutil.copyfile(geo_domain_timer_src, "/etc/systemd/system/awg-uplink-geo-domain-refresh.timer")
         shutil.copyfile(geo_domain_rotate_svc, "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.service")
         shutil.copyfile(geo_domain_rotate_tmr, "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.timer")
+        dns_refresh_py = str(root / "lib" / "awg-uplink-dns-refresh.py")
+        fw_py = str(root / "lib" / "awg-uplink-firewall-apply.py")
+        dns_svc = str(root / "systemd" / "awg-uplink-dns-refresh.service")
+        dns_tmr = str(root / "systemd" / "awg-uplink-dns-refresh.timer")
+        fw_svc = str(root / "systemd" / "awg-uplink-firewall.service")
+        tl_py = str(root / "lib" / "awg-uplink-dns-transport-lock.py")
+        tl_svc = str(root / "systemd" / "awg-uplink-dns-transport-lock.service")
+        amn_watch_py = str(root / "lib" / "awg-uplink-amnezia-dns-watch.py")
+        amn_watch_unit = str(root / "systemd" / "awg-uplink-amnezia-dns-watch.service")
+        if (
+            not Path(dns_refresh_py).exists()
+            or not Path(fw_py).exists()
+            or not Path(dns_svc).exists()
+            or not Path(dns_tmr).exists()
+            or not Path(fw_svc).exists()
+            or not Path(tl_py).exists()
+            or not Path(tl_svc).exists()
+            or not Path(amn_watch_py).exists()
+            or not Path(amn_watch_unit).exists()
+        ):
+            raise RuntimeError("dns/firewall runtime files are missing (lib/systemd)")
+        shutil.copyfile(dns_refresh_py, "/usr/local/sbin/awg-uplink-dns-refresh.py")
+        os.chmod("/usr/local/sbin/awg-uplink-dns-refresh.py", 0o755)
+        shutil.copyfile(fw_py, "/usr/local/sbin/awg-uplink-firewall-apply.py")
+        os.chmod("/usr/local/sbin/awg-uplink-firewall-apply.py", 0o755)
+        shutil.copyfile(amn_watch_py, "/usr/local/sbin/awg-uplink-amnezia-dns-watch.py")
+        os.chmod("/usr/local/sbin/awg-uplink-amnezia-dns-watch.py", 0o755)
+        shutil.copyfile(amn_watch_unit, "/etc/systemd/system/awg-uplink-amnezia-dns-watch.service")
+        shutil.copyfile(dns_svc, "/etc/systemd/system/awg-uplink-dns-refresh.service")
+        shutil.copyfile(dns_tmr, "/etc/systemd/system/awg-uplink-dns-refresh.timer")
+        shutil.copyfile(fw_svc, "/etc/systemd/system/awg-uplink-firewall.service")
+        shutil.copyfile(tl_py, "/usr/local/sbin/awg-uplink-dns-transport-lock.py")
+        os.chmod("/usr/local/sbin/awg-uplink-dns-transport-lock.py", 0o755)
+        shutil.copyfile(tl_svc, "/etc/systemd/system/awg-uplink-dns-transport-lock.service")
+        dc_unit = root / "systemd" / "dnscrypt-proxy.service"
+        if not dc_unit.exists():
+            raise RuntimeError("dnscrypt-proxy.service missing (systemd/)")
+        shutil.copyfile(str(dc_unit), "/etc/systemd/system/dnscrypt-proxy.service")
+        try:
+            Path("/etc/systemd/system/dnscrypt-proxy.socket.d/awg-uplink.conf").unlink(missing_ok=True)
+        except OSError:
+            pass
+        _run(["systemctl", "disable", "dnscrypt-proxy.socket"], timeout=5.0)
+        _run(["systemctl", "stop", "dnscrypt-proxy.socket"], timeout=5.0)
 
     def _apply_iface_routing(self):
         self._install_iface_runtime()
@@ -701,6 +1013,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         rc, out, err = _run(["systemctl", "restart", "awg-webui-ifaces.service"], timeout=5.0)
         if rc != 0:
             raise RuntimeError((err or out or "failed to restart awg-webui-ifaces.service").strip())
+        _run(["systemctl", "start", "awg-uplink-firewall.service"], timeout=30.0)
+        _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
+        _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
 
     def _apply_geo_ip_runtime(self, cfg: dict, *, run_refresh_now: bool = True):
         """run_refresh_now: однократный запуск awg-uplink-geo-ip-refresh.service (подтянуть списки в nft).
@@ -720,18 +1035,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _apply_geo_domain_runtime(self, cfg: dict, *, run_refresh_now: bool = True):
         enabled = self._is_geo_domain_enabled(cfg)
         _run(["systemctl", "daemon-reload"], timeout=3.0)
+        _run(["systemctl", "enable", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
+        _run(["systemctl", "start", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
         if enabled:
             _run(["systemctl", "enable", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
-            _run(["systemctl", "enable", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
             if run_refresh_now:
                 _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.service"], timeout=5.0)
             _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
-            _run(["systemctl", "start", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
         else:
             _run(["systemctl", "stop", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
             _run(["systemctl", "disable", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
-            _run(["systemctl", "stop", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
-            _run(["systemctl", "disable", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
             _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.service"], timeout=5.0)
 
     def _routing_runtime_status(self, cfg: dict) -> dict:
@@ -1346,6 +1659,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if isinstance(cfg, dict):
                 cfg = dict(cfg)
                 cfg["geo"] = self._load_geo_config()
+                cfg["firewall"] = self._iface_firewall_for_response(cfg)
             return self._send_json(
                 200,
                 {
@@ -1354,6 +1668,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "config_dir": self._webui_cfg_dir(),
                 },
             )
+
+        if sp == "/api/dns/config":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            return self._api_dns_config()
 
         if sp == "/api/netplan/config":
             if self._auth_enabled and not self._session_user():
@@ -1497,6 +1816,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
+            prev = self._load_iface_config()
             cfg = {
                 "egress_dev": str(body.get("egress_dev", "")).strip(),
                 "egress_ip": str(body.get("egress_ip", "")).strip(),
@@ -1506,6 +1826,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ingress_gw": str(body.get("ingress_gw", "")).strip(),
                 "route_mode": str(body.get("route_mode", "") or "egress").strip().lower(),
                 "geo": self._normalize_geo_cfg(body.get("geo", {})),
+                "firewall": self._merge_iface_firewall_save(prev, body.get("firewall")),
                 "updated_at": int(time.time()),
             }
             if cfg["route_mode"] not in ("egress", "tunnel", "georouting"):
@@ -1546,6 +1867,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                         "runtime": runtime,
                     },
                 )
+            try:
+                self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
+            except Exception:
+                pass
             resp = {
                 "ok": True,
                 "config": (lambda x: (dict(x) | {"geo": self._load_geo_config()}) if isinstance(x, dict) else {})(
@@ -1584,7 +1909,21 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             runtime = self._routing_runtime_status(cfg)
             if not runtime.get("applied"):
                 return self._send_json(500, {"ok": False, "error": "routing not applied", "runtime": runtime})
+            try:
+                self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
+            except Exception:
+                pass
             return self._send_json(200, {"ok": True, "config": cfg, "runtime": runtime})
+
+        if sp == "/api/dns/save":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            try:
+                self._install_iface_runtime()
+                return self._api_dns_save(body)
+            except Exception as e:
+                return self._send_text(500, f"dns apply failed: {e}")
 
         if sp == "/api/netplan/save":
             if self._auth_enabled and not self._session_user():

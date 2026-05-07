@@ -34,7 +34,7 @@ LIST_TIMEOUT_SEC = int(os.environ.get("AWG_GEO_DOMAIN_FETCH_TIMEOUT_SEC", "40"))
 AWG_IFACE = os.environ.get("AWG_GEO_DOMAIN_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
 TABLE_GEO_TUN = os.environ.get("AWG_GEO_DOMAIN_TABLE_TUN", "207").strip() or "207"
 TABLE_GEO_EGRESS = os.environ.get("AWG_GEO_DOMAIN_TABLE_EGRESS", "208").strip() or "208"
-CONF_TMP = Path("/tmp/awg-geo-domain-nftset.conf")
+DNSMASQ_GEO_NFTSET = Path("/etc/dnsmasq.d/awg-uplink-geo-domain-nftset.conf")
 
 
 def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -177,6 +177,8 @@ def _maybe_flush_geo_policy_routing_tables() -> None:
 
 
 def cleanup():
+    remove_dnsmasq_geo_conf()
+    restart_dnsmasq()
     for dec in (MARK_FWD_DEC, MARK_LOCAL_DEC):
         run(["ip", "rule", "del", "fwmark", dec, "priority", RULE_PRIO], check=False)
         run(["ip", "rule", "del", "fwmark", dec, "priority", "78"], check=False)
@@ -185,82 +187,103 @@ def cleanup():
             p = run(["ip", "rule", "del", "fwmark", dec], check=False)
             if p.returncode != 0:
                 break
-    run(["nft", "delete", "table", "ip", NFT_TABLE], check=False)
     run(["nft", "delete", "table", "ip", NFT_NAT_TABLE], check=False)
-    run(["nft", "delete", "table", "ip", NFT_TABLE_BACKUP], check=False)
     _maybe_flush_geo_policy_routing_tables()
+
+
+def restart_dnsmasq() -> None:
+    subprocess.run(["systemctl", "restart", "dnsmasq"], check=False)
+
+
+def remove_dnsmasq_geo_conf() -> None:
     try:
-        CONF_TMP.unlink(missing_ok=True)
-    except Exception:
+        DNSMASQ_GEO_NFTSET.unlink(missing_ok=True)
+    except OSError:
         pass
 
 
-def apply_nft(table_id: str, endpoint_ips: list[str], iface_cfg: dict):
+def apply_or_update_nft(table_id: str, endpoint_ips: list[str], iface_cfg: dict):
+    """Создаёт таблицу/цепочки при первом запуске; иначе только обновляет правила цепочек.
+    Набор {NFT_SET} не очищаем и таблицу ip не удаляем — очистка набора только через --rotate-nft."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    nft_tmp = Path(tempfile.mkstemp(prefix="awg-geo-domain-", suffix=".nft")[1])
-    try:
-        daddr_ne = (" " + " ".join([f"ip daddr != {ip}" for ip in endpoint_ips])) if endpoint_ips else ""
-        oif_guard = f'oifname != "{_nft_escape_iface(AWG_IFACE)}" ' if table_id == TABLE_GEO_TUN else ""
-        out_rule = f"    {oif_guard}ip daddr @{NFT_SET}" + daddr_ne + f" counter meta mark set {MARK_LOCAL_HEX}"
-        egress_dev = str((iface_cfg or {}).get("egress_dev", "") or "eth0").strip() or "eth0"
-        ingress_dev = str((iface_cfg or {}).get("ingress_dev", "") or "").strip()
-        pre_iface = [
-            f'iifname != "{_nft_escape_iface(egress_dev)}"',
-            'iifname != "lo"',
-        ]
-        if ingress_dev and ingress_dev != egress_dev:
-            pre_iface.append(f'iifname != "{_nft_escape_iface(ingress_dev)}"')
-        pre_rule = (
-            "    " + " ".join(pre_iface) + " " + "fib daddr type != local " + f"ip daddr @{NFT_SET}" + daddr_ne
-            + f" counter meta mark set {MARK_FWD_HEX}"
-        )
-        lines = [
-            f"table ip {NFT_TABLE} {{",
-            f"  set {NFT_SET} {{",
-            "    type ipv4_addr",
-            "    flags interval",
-            "  }",
-            "  chain out_mark {",
-            "    type route hook output priority mangle; policy accept;",
-            out_rule,
-            "  }",
-            "  chain pre_geo {",
-            "    type filter hook prerouting priority mangle; policy accept;",
-            pre_rule,
+    main_exists = run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode == 0
+
+    daddr_ne = (" " + " ".join([f"ip daddr != {ip}" for ip in endpoint_ips])) if endpoint_ips else ""
+    oif_guard = f'oifname != "{_nft_escape_iface(AWG_IFACE)}" ' if table_id == TABLE_GEO_TUN else ""
+    out_rule_embed = f"    {oif_guard}ip daddr @{NFT_SET}" + daddr_ne + f" counter meta mark set {MARK_LOCAL_HEX}"
+    egress_dev = str((iface_cfg or {}).get("egress_dev", "") or "eth0").strip() or "eth0"
+    ingress_dev = str((iface_cfg or {}).get("ingress_dev", "") or "").strip()
+    pre_iface = [
+        f'iifname != "{_nft_escape_iface(egress_dev)}"',
+        'iifname != "lo"',
+    ]
+    if ingress_dev and ingress_dev != egress_dev:
+        pre_iface.append(f'iifname != "{_nft_escape_iface(ingress_dev)}"')
+    pre_rule_embed = (
+        "    " + " ".join(pre_iface) + " " + "fib daddr type != local " + f"ip daddr @{NFT_SET}" + daddr_ne
+        + f" counter meta mark set {MARK_FWD_HEX}"
+    )
+    rule_out = " ".join(out_rule_embed.split())
+    rule_pre = " ".join(pre_rule_embed.split())
+
+    nat_lines: list[str] = []
+    tunnel_ip = awg_tunnel_ipv4() if table_id == TABLE_GEO_TUN else None
+    if tunnel_ip:
+        nat_lines = [
+            f"table ip {NFT_NAT_TABLE} {{",
+            "  chain postroute {",
+            f"    type nat hook postrouting priority {NAT_POST_PRIO}; policy accept;",
+            f'    meta mark {MARK_LOCAL_HEX} oifname "{_nft_escape_iface(AWG_IFACE)}" snat to {tunnel_ip}',
             "  }",
             "}",
         ]
-        tunnel_ip = awg_tunnel_ipv4() if table_id == TABLE_GEO_TUN else None
-        if tunnel_ip:
-            lines.extend(
-                [
-                    f"table ip {NFT_NAT_TABLE} {{",
-                    "  chain postroute {",
-                    f"    type nat hook postrouting priority {NAT_POST_PRIO}; policy accept;",
-                    f'    meta mark {MARK_LOCAL_HEX} oifname "{_nft_escape_iface(AWG_IFACE)}" snat to {tunnel_ip}',
-                    "  }",
-                    "}",
-                ]
-            )
-        elif table_id == TABLE_GEO_EGRESS:
-            edev = str((iface_cfg or {}).get("egress_dev", "") or "eth0").strip() or "eth0"
-            eip = str((iface_cfg or {}).get("egress_ip", "") or "").strip()
-            if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", eip):
-                eip = first_ipv4_on_dev(edev) or ""
-            if re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", eip):
-                lines.extend(
-                    [
-                        f"table ip {NFT_NAT_TABLE} {{",
-                        "  chain postroute {",
-                        f"    type nat hook postrouting priority {NAT_POST_PRIO}; policy accept;",
-                        f'    meta mark {MARK_LOCAL_HEX} oifname "{_nft_escape_iface(edev)}" snat to {eip}',
-                        "  }",
-                        "}",
-                    ]
-                )
-        nft_tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        run(["nft", "delete", "table", "ip", NFT_TABLE], check=False)
+    elif table_id == TABLE_GEO_EGRESS:
+        edev = str((iface_cfg or {}).get("egress_dev", "") or "eth0").strip() or "eth0"
+        eip = str((iface_cfg or {}).get("egress_ip", "") or "").strip()
+        if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", eip):
+            eip = first_ipv4_on_dev(edev) or ""
+        if re.match(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$", eip):
+            nat_lines = [
+                f"table ip {NFT_NAT_TABLE} {{",
+                "  chain postroute {",
+                f"    type nat hook postrouting priority {NAT_POST_PRIO}; policy accept;",
+                f'    meta mark {MARK_LOCAL_HEX} oifname "{_nft_escape_iface(edev)}" snat to {eip}',
+                "  }",
+                "}",
+            ]
+
+    nft_tmp = Path(tempfile.mkstemp(prefix="awg-geo-domain-", suffix=".nft")[1])
+    try:
+        blob_lines: list[str] = []
+        if not main_exists:
+            blob_lines = [
+                f"table ip {NFT_TABLE} {{",
+                f"  set {NFT_SET} {{",
+                "    type ipv4_addr",
+                "    flags interval",
+                "  }",
+                "  chain out_mark {",
+                "    type route hook output priority mangle; policy accept;",
+                out_rule_embed,
+                "  }",
+                "  chain pre_geo {",
+                "    type filter hook prerouting priority mangle; policy accept;",
+                pre_rule_embed,
+                "  }",
+                "}",
+            ]
+            blob_lines.extend(nat_lines)
+        else:
+            blob_lines = [
+                f"flush chain ip {NFT_TABLE} out_mark",
+                f"flush chain ip {NFT_TABLE} pre_geo",
+                f"add rule ip {NFT_TABLE} out_mark {rule_out}",
+                f"add rule ip {NFT_TABLE} pre_geo {rule_pre}",
+            ]
+            blob_lines.extend(nat_lines)
+
         run(["nft", "delete", "table", "ip", NFT_NAT_TABLE], check=False)
+        nft_tmp.write_text("\n".join(blob_lines) + "\n", encoding="utf-8")
         run(["nft", "-f", str(nft_tmp)], check=True)
         ensure_backup_table()
         for _prio in ("78", "88"):
@@ -362,13 +385,7 @@ def _nft_add_elements_chunked(table: str, set_name: str, elems: list[str]) -> No
 
 
 def rotate_nft_sets_to_backup() -> None:
-    """Раз в сутки: очистить резервный set, скопировать туда элементы основного, очистить основной."""
-    iface_cfg = load_json(CIF_JSON)
-    geo = load_json(GEO_JSON)
-    route_mode = str(iface_cfg.get("route_mode", "egress")).strip().lower()
-    geo = geo if isinstance(geo, dict) else {}
-    if route_mode != "georouting" or not bool(geo.get("domainMode", False)):
-        return
+    """Суточная ротация: только этот путь очищает основной set (после копии в backup)."""
     if run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode != 0:
         return
     ensure_backup_table()
@@ -413,16 +430,17 @@ def fetch_to_cache(url: str, target: Path):
     target.write_text("\n".join(domains) + "\n", encoding="utf-8")
 
 
-def write_dnsmasq_nftset_config(domains: list[str]):
-    CONF_TMP.parent.mkdir(parents=True, exist_ok=True)
+def write_dnsmasq_geo_conf(domains: list[str]) -> None:
     lines = [
-        "# autogen by awg-uplink-geo-domain-refresh.py",
-        f"# nft table/set: ip {NFT_TABLE}/{NFT_SET}",
-        "# format for future dnsmasq nftset integration",
+        "# Generated by awg-uplink-geo-domain-refresh.py — nftset → ip " + NFT_TABLE + " / " + NFT_SET,
     ]
     for d in domains:
         lines.append(f"nftset=/{d}/4#ip#{NFT_TABLE}#{NFT_SET}")
-    CONF_TMP.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    DNSMASQ_GEO_NFTSET.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DNSMASQ_GEO_NFTSET.with_suffix(DNSMASQ_GEO_NFTSET.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, DNSMASQ_GEO_NFTSET)
 
 
 def collect_domains(ready_domain: list, include_domains: list[str], exclude_set: set[str]) -> list[str]:
@@ -468,6 +486,7 @@ def main():
     table_id = TABLE_GEO_TUN if target == "tunnel" else TABLE_GEO_EGRESS
     sync_geo_policy_table(table_id, iface_cfg)
     endpoint_ips = awg_endpoints_ipv4()
+    apply_or_update_nft(table_id, endpoint_ips, iface_cfg)
 
     ready = geo.get("readyLinks", {}) if isinstance(geo.get("readyLinks", {}), dict) else {}
     ready_domain = ready.get("domain", []) if isinstance(ready.get("domain", []), list) else []
@@ -477,9 +496,6 @@ def main():
     exclude_set = set(normalize_domains(exclude_text))
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    all_domains = collect_domains(ready_domain, include_domains, exclude_set)
-    apply_nft(table_id, endpoint_ips, iface_cfg)
-    write_dnsmasq_nftset_config(all_domains)
 
     changed = False
     for entry in ready_domain:
@@ -500,7 +516,9 @@ def main():
             changed = True
 
     all_domains = collect_domains(ready_domain, include_domains, exclude_set)
-    write_dnsmasq_nftset_config(all_domains)
+    write_dnsmasq_geo_conf(all_domains)
+    restart_dnsmasq()
+
     if changed:
         geo_ready = geo.setdefault("readyLinks", {})
         geo_ready["domain"] = ready_domain

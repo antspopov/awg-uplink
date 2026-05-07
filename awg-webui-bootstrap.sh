@@ -173,11 +173,21 @@ done
 [[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" ]] || die "missing geo domain refresh timer in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" ]] || die "missing geo domain nft-rotate unit in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" ]] || die "missing geo domain nft-rotate timer in systemd/"
+[[ -f "$LIB_SRC/awg-uplink-dns-refresh.py" ]] || die "missing dns refresh script in lib/"
+[[ -f "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" ]] || die "missing amnezia dns watch script in lib/"
+[[ -f "$LIB_SRC/awg-uplink-dns-transport-lock.py" ]] || die "missing dns transport lock script in lib/"
+[[ -f "$LIB_SRC/awg-uplink-firewall-apply.py" ]] || die "missing firewall apply script in lib/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" ]] || die "missing dns refresh unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" ]] || die "missing dns refresh timer in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" ]] || die "missing amnezia dns watch unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" ]] || die "missing dns transport lock unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-firewall.service" ]] || die "missing firewall unit in systemd/"
+[[ -f "$SYSTEMD_SRC/dnscrypt-proxy.service" ]] || die "missing dnscrypt-proxy systemd unit (awg-uplink override)"
 
 if command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io, nftables)..."
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy >/dev/null
 fi
 
 ensure_amneziawg
@@ -202,11 +212,25 @@ install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.service" "$APP_ROOT/s
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" "$APP_ROOT/systemd/awg-uplink-geo-domain-refresh.timer"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" "$APP_ROOT/systemd/awg-uplink-geo-domain-nft-rotate.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" "$APP_ROOT/systemd/awg-uplink-geo-domain-nft-rotate.timer"
+install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" "$APP_ROOT/lib/awg-uplink-dns-refresh.py"
+install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" "$APP_ROOT/lib/awg-uplink-amnezia-dns-watch.py"
+install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" "$APP_ROOT/lib/awg-uplink-dns-transport-lock.py"
+install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" "$APP_ROOT/lib/awg-uplink-firewall-apply.py"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" "$APP_ROOT/systemd/awg-uplink-dns-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "$APP_ROOT/systemd/awg-uplink-dns-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "$APP_ROOT/systemd/awg-uplink-amnezia-dns-watch.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" "$APP_ROOT/systemd/awg-uplink-dns-transport-lock.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-firewall.service" "$APP_ROOT/systemd/awg-uplink-firewall.service"
+install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "$APP_ROOT/systemd/dnscrypt-proxy.service"
 
 log "Installing routing apply script..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" /usr/local/sbin/awg-webui-iface-routing-apply.sh
 install -m 755 "$LIB_SRC/awg-uplink-geo-ip-refresh.py" /usr/local/sbin/awg-uplink-geo-ip-refresh.py
 install -m 755 "$LIB_SRC/awg-uplink-geo-domain-refresh.py" /usr/local/sbin/awg-uplink-geo-domain-refresh.py
+install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" /usr/local/sbin/awg-uplink-dns-refresh.py
+install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" /usr/local/sbin/awg-uplink-amnezia-dns-watch.py
+install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" /usr/local/sbin/awg-uplink-dns-transport-lock.py
+install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" /usr/local/sbin/awg-uplink-firewall-apply.py
 
 log "Installing systemd units..."
 install -m 644 "$SYSTEMD_SRC/$WEBUI_SERVICE" "/etc/systemd/system/$WEBUI_SERVICE"
@@ -217,6 +241,16 @@ install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.service" "/etc/system
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" "/etc/systemd/system/awg-uplink-geo-domain-refresh.timer"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" "/etc/systemd/system/awg-uplink-dns-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "/etc/systemd/system/awg-uplink-dns-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "/etc/systemd/system/awg-uplink-amnezia-dns-watch.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" "/etc/systemd/system/awg-uplink-dns-transport-lock.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-firewall.service" "/etc/systemd/system/awg-uplink-firewall.service"
+install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscrypt-proxy.service"
+
+systemctl disable dnscrypt-proxy.socket >/dev/null 2>&1 || true
+systemctl stop dnscrypt-proxy.socket >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/dnscrypt-proxy.socket.d/awg-uplink.conf
 
 if [[ ! -f "$CFG_DIR/webui.env" ]]; then
   log "Creating default $CFG_DIR/webui.env"
@@ -268,6 +302,53 @@ EOF
   chmod 600 "$CFG_DIR/georouting.json"
 fi
 
+if [[ ! -f "$CFG_DIR/dns.json" ]]; then
+  log "Creating default $CFG_DIR/dns.json"
+  cat >"$CFG_DIR/dns.json" <<'EOF'
+{
+  "upstream_servers": ["77.88.8.8", "77.88.8.1"],
+  "dnscrypt_server_names": ["cloudflare", "google"],
+  "domains_list_updated_at": null,
+  "amnezia_dns_watch_enabled": true,
+  "amnezia_dns_container": "amnezia-dns",
+  "amnezia_dns_network": "amnezia-dns-net",
+  "amnezia_dns_forward_ip": "",
+  "dns_transport_lock_enabled": false
+}
+EOF
+  chmod 600 "$CFG_DIR/dns.json"
+fi
+
+log "Configuring local DNS (systemd-resolved stub off, dnsmasq base, caches)..."
+install -d -m 755 /var/cache/dnscrypt-proxy
+install -d -m 755 /var/lib/awg-uplink/geo-domain
+if id dnscrypt-proxy &>/dev/null; then
+  chown dnscrypt-proxy:dnscrypt-proxy /var/cache/dnscrypt-proxy 2>/dev/null || true
+fi
+install -d -m 755 /etc/systemd/resolved.conf.d
+cat >/etc/systemd/resolved.conf.d/awg-uplink-dns.conf <<'EOF'
+[Resolve]
+DNS=127.0.0.1
+DNSStubListener=no
+EOF
+install -d -m 755 /var/lib/awg-uplink/dnsmasq-package-snippets
+if [[ -f /etc/dnsmasq.d/ubuntu-fan ]]; then
+  mv /etc/dnsmasq.d/ubuntu-fan /var/lib/awg-uplink/dnsmasq-package-snippets/ubuntu-fan.bak
+fi
+rm -f /etc/dnsmasq.d/ubuntu-fan.awg-disabled /etc/dnsmasq.d/awg-uplink-base.conf
+cat >/etc/dnsmasq.d/zzz-awg-uplink-base.conf <<'EOF'
+# awg-uplink: DNS на всех интерфейсах. Сниппет ubuntu-fan отключаем: там bind-interfaces, он конфликтует с bind-dynamic и listen-address.
+except-interface=fan-*
+bind-dynamic
+cache-size=10000
+EOF
+if systemctl is-active --quiet systemd-resolved 2>/dev/null || systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
+  systemctl restart systemd-resolved || true
+  if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  fi
+fi
+
 # Backward-compatible defaults for existing configs.
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_HOST" "0.0.0.0"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_PORT" "8080"
@@ -280,6 +361,22 @@ chmod 600 "$CFG_DIR/webui.env"
 log "Reloading systemd daemon..."
 systemctl daemon-reload
 systemctl enable "$WEBUI_SERVICE" >/dev/null
+systemctl enable dnsmasq.service >/dev/null 2>&1 || true
+systemctl enable dnscrypt-proxy.service >/dev/null 2>&1 || true
+systemctl enable awg-uplink-dns-refresh.timer >/dev/null 2>&1 || true
+systemctl enable awg-uplink-amnezia-dns-watch.service >/dev/null 2>&1 || true
+systemctl enable awg-uplink-firewall.service >/dev/null 2>&1 || true
+systemctl enable awg-uplink-dns-transport-lock.service >/dev/null 2>&1 || true
+systemctl enable awg-uplink-geo-domain-nft-rotate.timer >/dev/null 2>&1 || true
+systemctl start awg-uplink-geo-domain-nft-rotate.timer >/dev/null 2>&1 || true
+
+log "Generating dnsmasq/dnscrypt configs (awg-uplink-dns-refresh)..."
+AWG_WEBUI_CFG_DIR="$CFG_DIR" python3 /usr/local/sbin/awg-uplink-dns-refresh.py || log "warning: initial dns-refresh failed (check logs)"
+
+systemctl start awg-uplink-dns-refresh.timer >/dev/null 2>&1 || true
+systemctl start awg-uplink-amnezia-dns-watch.service >/dev/null 2>&1 || true
+systemctl start awg-uplink-firewall.service >/dev/null 2>&1 || true
+systemctl restart awg-uplink-dns-transport-lock.service >/dev/null 2>&1 || true
 
 if [[ $NO_START -eq 0 ]]; then
   log "Restarting web UI service..."

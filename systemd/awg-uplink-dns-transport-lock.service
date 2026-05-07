@@ -1,0 +1,13 @@
+[Unit]
+Description=DNS transport lock (DoT/DoH block + DNS redirect) for Amnezia docker net
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+ExecStart=/usr/bin/python3 /usr/local/sbin/awg-uplink-dns-transport-lock.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

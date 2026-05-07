@@ -34,6 +34,16 @@ function fmtUptime(sec) {
   return `${m}м`;
 }
 
+function fmtUnixLocal(ts) {
+  const n = Number(ts);
+  if (!n || Number.isNaN(n)) return "";
+  try {
+    return new Date(n * 1000).toLocaleString();
+  } catch {
+    return String(ts);
+  }
+}
+
 function setOptions(selectEl, options, preferred) {
   selectEl.innerHTML = "";
   for (const opt of options) {
@@ -52,7 +62,7 @@ function setTunnelStatus(kind, text) {
   const root = $("tunnelStatus");
   const dot = root.querySelector(".dot");
   const statusText = root.querySelector(".status-text");
-  dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad");
+  dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad", "dot--muted");
   dot.classList.add(kind);
   statusText.textContent = text;
 }
@@ -63,10 +73,45 @@ function setStatusById(rootId, kind, text) {
   const dot = root.querySelector(".dot");
   const statusText = root.querySelector(".status-text");
   if (!dot || !statusText) return;
-  dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad");
+  dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad", "dot--muted");
   dot.classList.add(kind);
   statusText.textContent = text;
 }
+
+function setHealthRowStatus(statusId, kind, text) {
+  setStatusById(statusId, kind, text);
+  const root = document.getElementById(statusId);
+  if (!root) return;
+  const row = root.closest(".mt-health-row");
+  if (!row) return;
+  row.classList.remove(
+    "mt-health-row--ok",
+    "mt-health-row--warn",
+    "mt-health-row--bad",
+    "mt-health-row--unknown",
+    "mt-health-row--muted"
+  );
+  const tone = kind.replace(/^dot--/, "");
+  if (tone === "ok" || tone === "warn" || tone === "bad" || tone === "unknown" || tone === "muted") {
+    row.classList.add(`mt-health-row--${tone}`);
+  }
+}
+
+function systemdStateRu(s) {
+  const x = String(s || "").trim().toLowerCase();
+  if (x === "active") return "активен";
+  if (x === "inactive") return "не активен";
+  if (x === "enabled") return "включён";
+  if (x === "disabled") return "выключен";
+  if (x === "failed") return "ошибка";
+  if (x === "unknown") return "неизвестно";
+  if (!x) return "неизвестно";
+  return String(s);
+}
+
+const AMNEZIA_DNS_MISSING_MSG =
+  "Отсутствует сервис AmneziaDNS — установите его на сервер из приложения AmneziaVPN.";
+const AMNEZIA_DNS_GEO_HINT = "Отсутствует сервис AmneziaDNS смотри настройку DNS";
 
 function guessGateway(ip) {
   const m = String(ip || "").match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
@@ -508,26 +553,235 @@ async function refreshMtprotoState(state) {
     const enabled = mh.enabled !== false;
     const mode = mh.mode || "local";
     if (!enabled) {
-      setStatusById("mtpMaskStatus", "dot--warn", "Disabled");
+      setStatusById("mtpMaskStatus", "dot--warn", "Выключено");
     } else if (mode === "remote") {
-      setStatusById("mtpMaskStatus", "dot--ok", "Remote mode");
+      setStatusById("mtpMaskStatus", "dot--ok", "Удалённый режим");
     } else {
-      setStatusById("mtpMaskStatus", ok ? "dot--ok" : "dot--warn", ok ? "Healthy" : "Degraded");
+      setStatusById("mtpMaskStatus", ok ? "dot--ok" : "dot--warn", ok ? "Норма" : "Деградация");
     }
-    $("mtpMaskModeValue").textContent = mode;
+
+    if (!enabled) {
+      setHealthRowStatus("mtpMaskModeStatus", "dot--warn", "выключено");
+    } else if (mode === "remote") {
+      setHealthRowStatus("mtpMaskModeStatus", "dot--ok", "удалённый");
+    } else {
+      setHealthRowStatus("mtpMaskModeStatus", "dot--ok", "локальный");
+    }
+
     const endpoint = mh.endpoint || `127.0.0.1:${String(s.censorship?.mask_port ?? "--")}`;
-    const endpointState = mh.endpoint_status || (mh.endpoint_ok ? "OK" : "DOWN");
-    $("mtpMaskEndpointValue").textContent = `${endpoint} (${endpointState})`;
+    const endpointStateRaw = mh.endpoint_status || (mh.endpoint_ok ? "OK" : "DOWN");
+    const epUp = String(endpointStateRaw).toUpperCase() === "OK" || mh.endpoint_ok === true;
+    if (!enabled) {
+      setHealthRowStatus("mtpMaskEndpointStatus", "dot--warn", "не используется");
+    } else if (epUp) {
+      setHealthRowStatus("mtpMaskEndpointStatus", "dot--ok", `${endpoint} (доступна)`);
+    } else {
+      setHealthRowStatus("mtpMaskEndpointStatus", "dot--bad", `${endpoint} (недоступна)`);
+    }
+
     const nginx = mh.nginx || {};
-    $("mtpNginxValue").textContent = `${nginx.active || "unknown"} / ${nginx.enabled || "unknown"}`;
+    const na = String(nginx.active || "").toLowerCase();
+    let ngxDot = "dot--unknown";
+    if (na === "active") ngxDot = "dot--ok";
+    else if (na === "inactive" || na === "failed") ngxDot = "dot--bad";
+    else if (na) ngxDot = "dot--warn";
+    const nginxText = `${systemdStateRu(nginx.active)} / ${systemdStateRu(nginx.enabled)}`;
+    setHealthRowStatus("mtpMaskNginxStatus", ngxDot, nginxText);
+
     const timer = mh.health_timer || {};
-    $("mtpHealthTimerValue").textContent = `${timer.active || "unknown"} / ${timer.enabled || "unknown"}`;
+    const ta = String(timer.active || "").toLowerCase();
+    let timerDot = "dot--unknown";
+    if (ta === "active") timerDot = "dot--ok";
+    else if (ta === "inactive" || ta === "failed") timerDot = "dot--bad";
+    else if (ta) timerDot = "dot--warn";
+    const timerText = `${systemdStateRu(timer.active)} / ${systemdStateRu(timer.enabled)}`;
+    setHealthRowStatus("mtpMaskTimerStatus", timerDot, timerText);
   } catch {
     setStatusById("mtprotoUsersStatus", "dot--bad", "ошибка загрузки");
     setStatusById("mtprotoServiceStatus", "dot--bad", "health: ошибка");
     setStatusById("mtpMaskStatus", "dot--bad", "ошибка загрузки");
+    setHealthRowStatus("mtpMaskModeStatus", "dot--bad", "ошибка загрузки");
+    setHealthRowStatus("mtpMaskEndpointStatus", "dot--bad", "ошибка загрузки");
+    setHealthRowStatus("mtpMaskNginxStatus", "dot--bad", "ошибка загрузки");
+    setHealthRowStatus("mtpMaskTimerStatus", "dot--bad", "ошибка загрузки");
     setStatusById("mtpConfigStatus", "dot--bad", "ошибка загрузки");
   }
+}
+
+function dnsCfgBool(v, defaultVal = false) {
+  if (v === true) return true;
+  if (v === false) return false;
+  if (v === "true" || v === 1) return true;
+  if (v === "false" || v === 0 || v === "") return false;
+  return defaultVal;
+}
+
+function markDnsPanelDirty() {
+  window.__dnsPanelDirty = true;
+}
+
+function clearDnsPanelDirty() {
+  window.__dnsPanelDirty = false;
+}
+
+async function refreshDnsPanel() {
+  try {
+    const data = await fetchJson("/api/dns/config");
+    if (!data || !data.config) return;
+    const c = data.config;
+    const dirty = Boolean(window.__dnsPanelDirty);
+    if (!dirty) {
+      $("dnsUpstreamTa").value = Array.isArray(c.upstream_servers) ? c.upstream_servers.join("\n") : "";
+      $("dnsDnscryptTa").value = Array.isArray(c.dnscrypt_server_names) ? c.dnscrypt_server_names.join("\n") : "";
+    }
+
+    const dmOk = Boolean(data.dnsmasq_active);
+    const dcOk = Boolean(data.dnscrypt_active);
+    setHealthRowStatus("dnsHealthDnsmasqStatus", dmOk ? "dot--ok" : "dot--bad", dmOk ? "активен" : "не активен");
+    setHealthRowStatus("dnsHealthDnscryptStatus", dcOk ? "dot--ok" : "dot--bad", dcOk ? "активен" : "не активен");
+
+    const tl = data.dns_transport_lock || {};
+    const tlOn = dnsCfgBool(c.dns_transport_lock_enabled);
+    const tlToggle = $("dnsTransportLockToggle");
+    if (!dirty && tlToggle) tlToggle.checked = tlOn;
+    const tlActive = Boolean(tl.nft_active);
+    let tlWarn = false;
+    let tlDot = "dot--ok";
+    let tlText = "—";
+    if (!tlOn) {
+      if (tlActive) {
+        tlWarn = true;
+        tlDot = "dot--warn";
+        tlText =
+          "в конфиге разблокировано, nft ещё есть — проверьте awg-uplink-dns-transport-lock.service";
+      } else {
+        tlDot = "dot--muted";
+        tlText = "разблокировано";
+      }
+    } else if (tlActive) {
+      tlDot = "dot--ok";
+      tlText = "заблокировано";
+    } else {
+      tlWarn = true;
+      tlDot = "dot--warn";
+      tlText = "включено, nft не применён (journalctl -u awg-uplink-dns-transport-lock)";
+    }
+    setHealthRowStatus("dnsHealthDotStatus", tlDot, tlText);
+
+    const w = data.amnezia_dns_watch || {};
+    const present = w.container_present === undefined ? true : Boolean(w.container_present);
+    const domainReq = Boolean(w.domain_routing_requires);
+    const locked = w.toggle_locked === undefined ? false : Boolean(w.toggle_locked);
+    const checked =
+      w.toggle_checked === undefined ? dnsCfgBool(c.amnezia_dns_watch_enabled, true) : Boolean(w.toggle_checked);
+    const toggleEl = $("dnsAmneziaWatchToggle");
+    toggleEl.disabled = locked;
+    if (!dirty || locked) toggleEl.checked = checked;
+
+    const missingMsg = AMNEZIA_DNS_MISSING_MSG;
+    const detail = String(w.detail || "").trim();
+
+    let amDot = "dot--unknown";
+    let amText = "ожидание";
+    if (!present) {
+      amDot = "dot--bad";
+      amText = detail || missingMsg;
+    } else if (!w.service_active) {
+      amDot = "dot--bad";
+      amText = "сервис контроля не активен";
+    } else if (!dnsCfgBool(c.amnezia_dns_watch_enabled, true) && !domainReq) {
+      amDot = "dot--warn";
+      amText = "подмена выкл";
+    } else {
+      const st = w.status || "";
+      const gw = w.forward_ip ? ` → ${w.forward_ip}` : "";
+      if (st === "ok") {
+        amDot = "dot--ok";
+        amText = domainReq ? `подмена ок${gw} (обязательно для доменов)` : `подмена ок${gw}`;
+      } else if (st === "disabled") {
+        amDot = "dot--warn";
+        amText = "подмена выкл";
+      } else if (st === "no_container") {
+        amDot = "dot--bad";
+        amText = detail || missingMsg;
+      } else if (st === "error") {
+        amDot = "dot--bad";
+        amText = detail ? `ошибка: ${detail}` : "ошибка подмены";
+      } else {
+        amDot = "dot--warn";
+        amText = String(st || "ожидание");
+      }
+    }
+    setHealthRowStatus("dnsHealthAmneziaStatus", amDot, amText);
+    const amRoot = document.getElementById("dnsHealthAmneziaStatus");
+    if (amRoot) amRoot.title = detail || (!present ? missingMsg : "");
+    window.__amneziaDnsContainerPresent = present;
+
+    let overallKind = "dot--ok";
+    let overallText = "Норма";
+    let sev = 0;
+    if (!dmOk && !dcOk) sev = 2;
+    else if (!dmOk || !dcOk) sev = 1;
+    if (amDot === "dot--bad") sev = Math.max(sev, 2);
+    else if (amDot === "dot--warn") sev = Math.max(sev, 1);
+    if (tlWarn) sev = Math.max(sev, 1);
+    if (sev >= 2) {
+      overallKind = "dot--bad";
+      if (!dmOk && !dcOk) overallText = "dnsmasq и dnscrypt-proxy не активны";
+      else if (amDot === "dot--bad") overallText = "Проблема Amnezia DNS";
+      else overallText = "Ошибка";
+    } else if (sev === 1) {
+      overallKind = "dot--warn";
+      overallText = "Есть замечания";
+    }
+    setStatusById("dnsHealthOverallStatus", overallKind, overallText);
+
+    const ts = data.domains_list_updated_at;
+    $("dnsLastUpdated").textContent = ts
+      ? `Списки доменов: ${fmtUnixLocal(ts)}`
+      : "Списки доменов: не обновлялись";
+  } catch {
+    setStatusById("dnsHealthOverallStatus", "dot--bad", "ошибка загрузки");
+    setHealthRowStatus("dnsHealthDnsmasqStatus", "dot--unknown", "—");
+    setHealthRowStatus("dnsHealthDnscryptStatus", "dot--unknown", "—");
+    setHealthRowStatus("dnsHealthAmneziaStatus", "dot--unknown", "—");
+    setHealthRowStatus("dnsHealthDotStatus", "dot--unknown", "—");
+    const amRoot = document.getElementById("dnsHealthAmneziaStatus");
+    if (amRoot) amRoot.title = "";
+  }
+}
+
+function initDnsPanel() {
+  for (const id of ["dnsUpstreamTa", "dnsDnscryptTa"]) {
+    $(id).addEventListener("input", () => markDnsPanelDirty());
+  }
+  $("dnsTransportLockToggle").addEventListener("change", () => markDnsPanelDirty());
+  $("dnsAmneziaWatchToggle").addEventListener("change", () => markDnsPanelDirty());
+
+  $("dnsApplyBtn").addEventListener("click", async () => {
+    const btn = $("dnsApplyBtn");
+    try {
+      btn.disabled = true;
+      const payload = {
+        upstream_servers: $("dnsUpstreamTa").value,
+        dnscrypt_server_names: $("dnsDnscryptTa").value,
+        amnezia_dns_watch_enabled: $("dnsAmneziaWatchToggle").checked,
+        dns_transport_lock_enabled: $("dnsTransportLockToggle").checked,
+      };
+      const res = await postJson("/api/dns/save", payload);
+      clearDnsPanelDirty();
+      await refreshDnsPanel();
+      const wr = res && res.amnezia_dns_watch;
+      if (wr && wr.container_present === false && wr.domain_routing_requires) {
+        toast(wr.detail || AMNEZIA_DNS_MISSING_MSG, "warn", 7000);
+      }
+      toast("DNS применён.", "ok", 2600);
+    } catch (e) {
+      toast(`Ошибка применения DNS: ${e?.message || "unknown"}`, "error", 3200);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 function initMtprotoPanel(state) {
@@ -681,6 +935,9 @@ async function initNetworkForm(state) {
     }
     if (cfg.ingress_ip) $("ingressIp").value = cfg.ingress_ip;
     if (typeof cfg.ingress_gw === "string") $("ingressGw").value = cfg.ingress_gw;
+    const fw = cfg.firewall || {};
+    $("ifaceFwEgressPorts").value = Array.isArray(fw.egress_tcp_ports) ? fw.egress_tcp_ports.join(", ") : "";
+    $("ifaceFwIngressPorts").value = Array.isArray(fw.ingress_tcp_ports) ? fw.ingress_tcp_ports.join(", ") : "";
     if (cfg.route_mode) {
       state.routeMode = cfg.route_mode;
       state.persistedRouteMode = cfg.route_mode;
@@ -743,6 +1000,10 @@ function initInterfaceSave() {
       ingress_gw: $("ingressGw").value.trim(),
       route_mode: window.__awgState && window.__awgState.routeMode ? window.__awgState.routeMode : "egress",
       geo: window.__awgState && window.__awgState.geo ? window.__awgState.geo : {},
+      firewall: {
+        egress_tcp_ports: $("ifaceFwEgressPorts").value,
+        ingress_tcp_ports: $("ifaceFwIngressPorts").value,
+      },
     };
     if (!body.egress_dev || !body.egress_ip) {
       toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
@@ -763,6 +1024,7 @@ function initInterfaceSave() {
       }
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
+      await refreshDnsPanel();
     } catch (e) {
       setStatusById("egressStatus", "dot--bad", "ошибка применения");
       setStatusById("ingressStatus", "dot--bad", "ошибка применения");
@@ -923,6 +1185,18 @@ function initRoutingPanel(state) {
   };
   const closeGeoReadyModal = () => geoReadyModal.overlay.classList.add("hidden");
 
+  async function ensureAmneziaDnsWatchEnabledNow() {
+    const payload = {
+      upstream_servers: $("dnsUpstreamTa").value,
+      dnscrypt_server_names: $("dnsDnscryptTa").value,
+      amnezia_dns_watch_enabled: true,
+      dns_transport_lock_enabled: $("dnsTransportLockToggle").checked,
+    };
+    await postJson("/api/dns/save", payload);
+    clearDnsPanelDirty();
+    await refreshDnsPanel();
+  }
+
   function refreshReadyStatus(kind) {
     const isIp = kind === "ip";
     const links = isIp ? state.geo.readyLinks.ip : state.geo.readyLinks.domain;
@@ -937,6 +1211,11 @@ function initRoutingPanel(state) {
       (x) => x && x.enabled !== false && (x.status === "на проверке" || x.status === "ожидает проверки")
     ).length;
     const errCount = links.filter((x) => x && x.enabled !== false && x.status === "с ошибкой").length;
+
+    if (kind === "domain" && state.geo.domainMode && window.__amneziaDnsContainerPresent === false) {
+      setStatusById("geoDomainReadyStatus", "dot--bad", AMNEZIA_DNS_GEO_HINT);
+      return;
+    }
 
     // Priority order from user:
     // 1) all active & checked => green
@@ -1103,6 +1382,7 @@ function initRoutingPanel(state) {
       setRouteModeStatus(state.routeMode, true);
       if (!options.silent) toast(state.routeMode === "tunnel" ? "Режим туннеля применен." : "Режим egress применен.", "ok");
       refreshGeoUi();
+      await refreshDnsPanel();
     } catch (e) {
       setRouteModeStatus(mode, false);
       if (!options.silent) toast(`Ошибка применения режима: ${e?.message || "unknown"}`, "error", 2800);
@@ -1125,6 +1405,10 @@ function initRoutingPanel(state) {
         route_mode: "georouting",
         geo: state.geo || {},
         apply_geo_ip_refresh: true,
+        firewall: {
+          egress_tcp_ports: $("ifaceFwEgressPorts").value,
+          ingress_tcp_ports: $("ifaceFwIngressPorts").value,
+        },
       };
       if (!body.egress_dev || !body.egress_ip) {
         toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
@@ -1146,6 +1430,20 @@ function initRoutingPanel(state) {
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
       toast("Georouting применен. Сервисы обновления списков перезапущены.", "ok", 2600);
       refreshGeoUi();
+      await refreshDnsPanel();
+      try {
+        const d = await fetchJson("/api/dns/config");
+        const wr = d && d.amnezia_dns_watch;
+        if (state.geo && state.geo.domainMode && wr && wr.container_present === false) {
+          toast(
+            wr.detail || "Отсутствует сервис AmneziaDNS — установите его на сервер из приложения AmneziaVPN.",
+            "warn",
+            7000,
+          );
+        }
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
       setStatusById("routingModeStatus", "dot--bad", "georouting: ошибка применения");
       toast(`Ошибка применения georouting: ${e?.message || "unknown"}`, "error", 3200);
@@ -1176,10 +1474,22 @@ function initRoutingPanel(state) {
     state.geo.ipMode = !state.geo.ipMode;
     refreshGeoUi();
   });
-  geoDomainModeBtn.addEventListener("click", () => {
+  geoDomainModeBtn.addEventListener("click", async () => {
     if (state.routeMode !== "georouting") return;
-    state.geo.domainMode = !state.geo.domainMode;
+    if (!state.geo.domainMode && window.__amneziaDnsContainerPresent === false) {
+      setStatusById("geoDomainReadyStatus", "dot--bad", AMNEZIA_DNS_GEO_HINT);
+      toast(AMNEZIA_DNS_MISSING_MSG, "warn", 7000);
+      return;
+    }
+    const enabling = !state.geo.domainMode;
+    state.geo.domainMode = enabling;
     refreshGeoUi();
+    if (!enabling) return;
+    try {
+      await ensureAmneziaDnsWatchEnabledNow();
+    } catch (e) {
+      toast(`Не удалось включить подмену AmneziaDNS: ${e?.message || "unknown"}`, "error", 4200);
+    }
   });
 
   geoLists.ipInclude.addEventListener("click", () => openGeoListModal("ipInclude"));
@@ -1364,6 +1674,7 @@ async function main() {
 
   initImportModal(state);
   initMtprotoPanel(state);
+  initDnsPanel();
   initInterfaceSave();
   initNetplanEditor();
 
@@ -1372,9 +1683,11 @@ async function main() {
   initRoutingPanel(state);
   await refreshSystemMetrics(state);
   await refreshMtprotoState(state);
+  await refreshDnsPanel();
   setInterval(() => refreshTunnelStatus(state), 5000);
   setInterval(() => refreshSystemMetrics(state), 2000);
   setInterval(() => refreshMtprotoState(state), 5000);
+  setInterval(() => refreshDnsPanel(), 12000);
 }
 
 window.addEventListener("DOMContentLoaded", main);

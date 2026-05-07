@@ -357,6 +357,107 @@ body::before {
   margin-top: 18px;
 }
 
+.dns-settings-card {
+  margin-top: 12px;
+}
+
+.dns-health-card {
+  margin-top: 12px;
+}
+
+.dns-settings-row {
+  margin-top: 8px;
+}
+
+.dns-textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.dns-amnezia-watch-field {
+  margin-top: 14px;
+}
+
+.dns-amnezia-watch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dns-amnezia-watch-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-switch-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 26px;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  border: 1px solid var(--border);
+}
+
+.toggle-switch-slider::before {
+  content: "";
+  position: absolute;
+  height: 20px;
+  width: 20px;
+  left: 2px;
+  bottom: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.toggle-switch input:checked + .toggle-switch-slider {
+  background: rgba(52, 211, 153, 0.28);
+  border-color: rgba(52, 211, 153, 0.45);
+}
+
+.toggle-switch input:checked + .toggle-switch-slider::before {
+  transform: translateX(22px);
+  background: var(--ok);
+}
+
+.toggle-switch input:focus-visible + .toggle-switch-slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.toggle-switch input:disabled + .toggle-switch-slider {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dns-amnezia-watch-desc,
+.dns-amnezia-watch-apphint {
+  margin-top: 8px;
+}
+
 .card-head {
   display: flex;
   align-items: center;
@@ -387,6 +488,11 @@ body::before {
 
 .dot--unknown {
   background: rgba(255, 255, 255, 0.35);
+}
+
+.dot--muted {
+  background: rgba(160, 170, 190, 0.55);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
 }
 
 .dot--ok {
@@ -841,6 +947,45 @@ select:disabled option {
   color: rgba(255, 255, 255, 0.92);
   white-space: normal;
   word-break: break-word;
+}
+
+.status--health-cell {
+  align-items: flex-start;
+  max-width: 100%;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.status--health-cell .dot {
+  flex-shrink: 0;
+  /* совмещаем центр точки с центром первой строки текста */
+  margin-top: calc(0.5lh - 4.5px);
+}
+
+.status--health-cell .status-text {
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+}
+
+.mt-health-row--ok {
+  background: rgba(52, 211, 153, 0.07);
+}
+
+.mt-health-row--warn {
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.mt-health-row--bad {
+  background: rgba(251, 113, 133, 0.09);
+}
+
+.mt-health-row--unknown {
+  background: transparent;
+}
+
+.mt-health-row--muted {
+  background: rgba(255, 255, 255, 0.035);
 }
 
 @media (max-width: 720px) {

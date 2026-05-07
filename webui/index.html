@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>awg-uplink — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260506-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260507-3" />
   </head>
   <body>
     <div class="app">
@@ -94,6 +94,13 @@
                     Если шлюз не указан, будет использовано системное значение.
                   </div>
                 </div>
+                <div class="field">
+                  <label>Разрешённые входящие TCP</label>
+                  <input id="ifaceFwEgressPorts" type="text" placeholder="22" />
+                  <div class="help">
+                    Новые входящие на egress разрешены только на указанных портах (остальное — drop). SSH по умолчанию 22.
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -125,6 +132,13 @@
                     Ingress — дополнительный интерфейс/адрес для подключения пользователей к серверу из интернета.
                     Если дополнительного интерфейса/адреса на сервере нет, настраивать ingress не нужно — роль ingress
                     возьмет на себя Egress интерфейс.
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Разрешённые входящие TCP</label>
+                  <input id="ifaceFwIngressPorts" type="text" placeholder="22, 443, 8080" />
+                  <div class="help">
+                    Когда ingress совпадает с egress, порты объединяются в одном правиле. Отдельная карточка ingress — только если выбран другой интерфейс/адрес.
                   </div>
                 </div>
               </div>
@@ -271,6 +285,148 @@
 
           <div class="panel-head">
             <div class="panel-head-left">
+              <h2>Настройка DNS</h2>
+            </div>
+            <div class="hint">
+              Сводка сервисов и DoT/DoH — в блоке «Состояние DNS» ниже. Dnsmasq слушает все интерфейсы; dnscrypt-proxy —
+              только localhost; остальные домены идут на серверы из списка dnsmasq.
+            </div>
+          </div>
+
+          <div class="card dns-health-card">
+            <div class="card-head">
+              <div class="users-head-left">
+                <div class="card-title">Состояние DNS</div>
+                <div class="status" id="dnsHealthOverallStatus">
+                  <span class="dot dot--unknown"></span>
+                  <span class="status-text">не загружено</span>
+                </div>
+              </div>
+            </div>
+            <div class="mt-health-list">
+              <div class="mt-health-row">
+                <div class="mt-health-key">dnsmasq</div>
+                <div class="mt-health-val">
+                  <div class="status status--health-cell" id="dnsHealthDnsmasqStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-health-row">
+                <div class="mt-health-key">dnscrypt-proxy</div>
+                <div class="mt-health-val">
+                  <div class="status status--health-cell" id="dnsHealthDnscryptStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-health-row">
+                <div class="mt-health-key">Amnezia DNS</div>
+                <div class="mt-health-val">
+                  <div class="status status--health-cell" id="dnsHealthAmneziaStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-health-row">
+                <div class="mt-health-key">DoT / DoH</div>
+                <div class="mt-health-val">
+                  <div class="status status--health-cell" id="dnsHealthDotStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">—</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card dns-settings-card">
+            <div class="card-head">
+              <div class="users-head-left">
+                <div class="card-title">Dnsmasq и dnscrypt-proxy</div>
+              </div>
+              <div class="users-head-right">
+                <div class="users-meta" id="dnsLastUpdated">Списки доменов: не обновлялись</div>
+                <button class="btn btn--primary" id="dnsApplyBtn" type="button">Применить</button>
+              </div>
+            </div>
+
+            <div class="row dns-settings-row">
+              <div class="field">
+                <label>Серверы для dnsmasq (прямые запросы, по строке на сервер)</label>
+                <textarea id="dnsUpstreamTa" class="dns-textarea" rows="4" spellcheck="false" placeholder="77.88.8.8&#10;77.88.8.1"></textarea>
+              </div>
+              <div class="field">
+                <label>Серверы dnscrypt-proxy (имена из public-resolvers, по одному на строку)</label>
+                <textarea id="dnsDnscryptTa" class="dns-textarea" rows="4" spellcheck="false" placeholder="cloudflare&#10;google"></textarea>
+              </div>
+            </div>
+
+            <div class="field dns-amnezia-watch-field">
+              <div class="dns-amnezia-watch-row">
+                <label class="dns-amnezia-watch-text" for="dnsAmneziaWatchToggle">
+                  Подмена AmneziaDNS (Unbound) на dnsmasq хоста
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="dnsAmneziaWatchToggle" role="switch" />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="help dns-amnezia-watch-desc">
+                Нужна для снижения риска утечки DNS и чтобы запросы клиентов AmneziaVPN к контейнеру AmneziaDNS проходили
+                через ваш dnsmasq/dnscrypt на шлюзе docker-сети (обычно <code>172.29.172.1</code>). При режиме маршрутизации по
+                спискам доменов (georouting) опция включена и заблокирована: без неё доменная схема работает ненадёжно.
+              </div>
+              <div class="help dns-amnezia-watch-apphint">
+                В приложении Amnezia VPN на сервере должен быть установлен сервис AmneziaDNS (контейнер):
+                Settings → Servers → Ваш сервер → Services → AmneziaDNS → Install.
+                Также необходимо включить пересылку DNS: Settings → Connections → Use AmneziaDNS.
+                Тогда клиенты шлют DNS в контейнер, а мы перенаправляем его на хостовый dnsmasq/dnscrypt.
+              </div>
+              <div class="help">
+                Фоновый сервер проверяет конфигурацию примерно каждые 30 с; после подмены контейнер AmneziaDNS перезапускается
+                только если действительно изменился форвард корня «.» (не на каждом цикле).
+              </div>
+            </div>
+
+            <div class="field dns-amnezia-watch-field">
+              <div class="dns-amnezia-watch-row">
+                <label class="dns-amnezia-watch-text" for="dnsTransportLockToggle">
+                  Блокировка DNS over TLS и DNS over HTTPS, перехват DNS-запросов
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="dnsTransportLockToggle" role="switch" />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="help dns-amnezia-watch-desc">
+                Использовать с осторожностью: на некоторых клиентах возможны сбои (жёстко прошитые резолверы, приложения с
+                собственным DNS).
+              </div>
+              <div class="help dns-amnezia-watch-desc">
+                На шлюзе включается перенаправление UDP/TCP 53 в Docker-сети Amnezia на Dnsmasq (<code>172.29.172.1</code>
+                или фактический Gateway сети), блокируется DoT (853) и HTTPS к типичным публичным DoH. Так проще удержать
+                запросы на вашем Dnsmasq/dnscrypt, снизить утечки DNS и сделать стабильнее режим «По списку доменов» в
+                геомаршрутизации.
+              </div>
+              <div class="help">
+                Опция самостоятельна: не связана с подменой AmneziaDNS и режимами геомаршрутизации; действует по флагу в
+                <code>dns.json</code> после «Применить» или загрузки юнита при старте системы.
+              </div>
+            </div>
+
+            <div class="help">
+              Домены из защищённых готовых списков всегда уходят в dnscrypt; остальные готовые списки и include/exclude — при включённом режиме «по доменам» в georouting. Обновление списков — каждые 6 ч или по «Применить».
+            </div>
+          </div>
+
+          <div class="panel-sep"></div>
+
+          <div class="panel-head">
+            <div class="panel-head-left">
               <h2>Настройка MTProto</h2>
               <div class="status" id="mtprotoServiceStatus">
                 <span class="dot dot--unknown"></span>
@@ -310,20 +466,40 @@
               </div>
               <div class="mt-health-list">
                 <div class="mt-health-row">
-                  <div class="mt-health-key">Mode</div>
-                  <div class="mt-health-val" id="mtpMaskModeValue">--</div>
+                  <div class="mt-health-key">Режим</div>
+                  <div class="mt-health-val">
+                    <div class="status status--health-cell" id="mtpMaskModeStatus">
+                      <span class="dot dot--unknown"></span>
+                      <span class="status-text">—</span>
+                    </div>
+                  </div>
                 </div>
                 <div class="mt-health-row">
-                  <div class="mt-health-key">Endpoint</div>
-                  <div class="mt-health-val" id="mtpMaskEndpointValue">--</div>
+                  <div class="mt-health-key">Конечная точка</div>
+                  <div class="mt-health-val">
+                    <div class="status status--health-cell" id="mtpMaskEndpointStatus">
+                      <span class="dot dot--unknown"></span>
+                      <span class="status-text">—</span>
+                    </div>
+                  </div>
                 </div>
                 <div class="mt-health-row">
                   <div class="mt-health-key">Nginx</div>
-                  <div class="mt-health-val" id="mtpNginxValue">--</div>
+                  <div class="mt-health-val">
+                    <div class="status status--health-cell" id="mtpMaskNginxStatus">
+                      <span class="dot dot--unknown"></span>
+                      <span class="status-text">—</span>
+                    </div>
+                  </div>
                 </div>
                 <div class="mt-health-row">
-                  <div class="mt-health-key">Health Timer</div>
-                  <div class="mt-health-val" id="mtpHealthTimerValue">--</div>
+                  <div class="mt-health-key">Таймер health</div>
+                  <div class="mt-health-val">
+                    <div class="status status--health-cell" id="mtpMaskTimerStatus">
+                      <span class="dot dot--unknown"></span>
+                      <span class="status-text">—</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -475,7 +651,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260506-1"></script>
+    <script src="./app.js?v=20260507-3"></script>
   </body>
 </html>
 
