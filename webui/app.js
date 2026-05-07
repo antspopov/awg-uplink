@@ -109,6 +109,33 @@ function systemdStateRu(s) {
   return String(s);
 }
 
+function ruUsersCount(n) {
+  const k = Math.abs(Number(n) || 0);
+  const mod10 = k % 10;
+  const mod100 = k % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${k} пользователь`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${k} пользователя`;
+  return `${k} пользователей`;
+}
+
+/** Список причин, почему masking_health.ok === false (для текста в шапке карточки). */
+function maskingIssueSummaryLines(mh) {
+  const issues = [];
+  const epOk = mh.endpoint_ok === true || String(mh.endpoint_status || "").toUpperCase() === "OK";
+  if (!epOk) issues.push("конечная точка недоступна");
+  const ngx = mh.nginx || {};
+  if (ngx.ok === false) issues.push("Nginx не в норме");
+  const tm = mh.health_timer || {};
+  if (tm.ok === false) issues.push("таймер health не в норме");
+  if (mh.mask_port_open_local === false) issues.push("локальный порт маскировки недоступен");
+  return issues;
+}
+
+function maskingIssueSummaryText(mh) {
+  const issues = maskingIssueSummaryLines(mh);
+  return issues.length ? issues.join(" · ") : "не все проверки пройдены (см. строки ниже)";
+}
+
 const AMNEZIA_DNS_MISSING_MSG =
   "Отсутствует сервис AmneziaDNS — установите его на сервер из приложения AmneziaVPN.";
 const AMNEZIA_DNS_GEO_HINT = "Отсутствует сервис AmneziaDNS смотри настройку DNS";
@@ -529,6 +556,26 @@ async function refreshMtprotoState(state) {
     $("mtpConfigPathLabel").textContent = `Путь: ${s.config_path || "--"}`;
     $("mtpConfigText").value = s.config_text || "";
 
+    const cfgOk = Boolean(s.config_exists);
+    const up = s.upstream || {};
+    const ob = $("mtpOutboundMode");
+    if (ob) {
+      const m = up.mode === "egress" ? "egress" : up.mode === "tunnel" ? "tunnel" : "direct";
+      ob.value = m;
+      ob.disabled = !cfgOk;
+    }
+    const om = $("mtpOutboundMeta");
+    if (om) {
+      const parts = [];
+      if (up.public_ip_derived) parts.push(`public_ip → ${up.public_ip_derived}`);
+      if (up.middle_proxy_nat_ip_derived) parts.push(`middle_proxy_nat_ip → ${up.middle_proxy_nat_ip_derived}`);
+      parts.push(`egress ${up.egress_dev || "—"} · ingress ${up.ingress_dev || "—"}`);
+      const cfgIf = String(up.tunnel_interface_config || "").trim();
+      if (cfgIf) parts.push(`[upstream.tunnel] ${cfgIf}`);
+      if (up.tunnel_iface_up === false) parts.push("awg-uplink не UP");
+      om.textContent = parts.join(" · ");
+    }
+
     const users = s.users || [];
     renderMtprotoUsers(users);
     const usersCount = Number(s.users_total ?? users.length);
@@ -536,12 +583,23 @@ async function refreshMtprotoState(state) {
     const sessionsCap = Number(s.sessions_cap ?? usersCount * 9);
     const unassigned = Number(s.unassigned ?? Math.max(0, sessionsCap - sessionsOpen));
     $("mtpUsersMeta").textContent = `${usersCount} users · sessions ${sessionsOpen}/${sessionsCap} · unassigned ${unassigned}`;
-    setStatusById("mtprotoUsersStatus", "dot--ok", `загружено`);
+
+    const svcOk = Boolean((s.service || {}).ok);
+    const n = users.length;
+    if (!cfgOk) {
+      setStatusById("mtprotoUsersStatus", "dot--warn", "MTProto не настроен (нет config.toml)");
+    } else if (!svcOk) {
+      setStatusById("mtprotoUsersStatus", "dot--warn", "конфиг есть, прокси не активен");
+    } else if (n === 0) {
+      setStatusById("mtprotoUsersStatus", "dot--muted", "в конфиге нет пользователей");
+    } else {
+      setStatusById("mtprotoUsersStatus", "dot--ok", `загружено — ${ruUsersCount(n)}`);
+    }
+
     setStatusById("mtpConfigStatus", s.config_exists ? "dot--ok" : "dot--warn", s.config_exists ? "загружен" : "не найден");
     const svc = s.service || {};
     const svcName = svc.name || "mtproto-proxy";
     const svcState = svc.state || "unknown";
-    const svcOk = Boolean(svc.ok);
     setStatusById(
       "mtprotoServiceStatus",
       svcOk ? "dot--ok" : "dot--bad",
@@ -552,12 +610,22 @@ async function refreshMtprotoState(state) {
     const ok = Boolean(mh.ok);
     const enabled = mh.enabled !== false;
     const mode = mh.mode || "local";
+    const maskStatusRoot = document.getElementById("mtpMaskStatus");
     if (!enabled) {
       setStatusById("mtpMaskStatus", "dot--warn", "Выключено");
-    } else if (mode === "remote") {
-      setStatusById("mtpMaskStatus", "dot--ok", "Удалённый режим");
+      if (maskStatusRoot) maskStatusRoot.title = "";
+    } else if (ok) {
+      if (mode === "remote") {
+        setStatusById("mtpMaskStatus", "dot--ok", "Удалённый режим");
+      } else {
+        setStatusById("mtpMaskStatus", "dot--ok", "Норма");
+      }
+      if (maskStatusRoot) maskStatusRoot.title = "";
     } else {
-      setStatusById("mtpMaskStatus", ok ? "dot--ok" : "dot--warn", ok ? "Норма" : "Деградация");
+      const detail = maskingIssueSummaryText(mh);
+      const headline = mode === "remote" ? "Удалённый режим — " : "";
+      setStatusById("mtpMaskStatus", "dot--warn", `${headline}${detail}`);
+      if (maskStatusRoot) maskStatusRoot.title = detail;
     }
 
     if (!enabled) {
@@ -600,6 +668,10 @@ async function refreshMtprotoState(state) {
     setStatusById("mtprotoUsersStatus", "dot--bad", "ошибка загрузки");
     setStatusById("mtprotoServiceStatus", "dot--bad", "health: ошибка");
     setStatusById("mtpMaskStatus", "dot--bad", "ошибка загрузки");
+    const upMetaErr = $("mtpOutboundMeta");
+    if (upMetaErr) upMetaErr.textContent = "";
+    const maskErrRoot = document.getElementById("mtpMaskStatus");
+    if (maskErrRoot) maskErrRoot.title = "";
     setHealthRowStatus("mtpMaskModeStatus", "dot--bad", "ошибка загрузки");
     setHealthRowStatus("mtpMaskEndpointStatus", "dot--bad", "ошибка загрузки");
     setHealthRowStatus("mtpMaskNginxStatus", "dot--bad", "ошибка загрузки");
@@ -798,6 +870,27 @@ function initMtprotoPanel(state) {
     $("mtpConfigModalOverlay").classList.remove("hidden");
   });
 
+  const outboundSel = $("mtpOutboundMode");
+  if (outboundSel) {
+    outboundSel.addEventListener("change", async () => {
+      const mode = String(outboundSel.value || "direct").trim();
+      try {
+        const res = await postJson("/api/mtproto/outbound/set", { mode });
+        if (!res || !res.ok) {
+          toast((res && res.error) || "Не удалось применить исходящий интерфейс или перезапустить сервис.", "error", 4200);
+        } else {
+          toast("MTProto: config.toml обновлён, сервис перезапущен.", "ok", 2200);
+        }
+        const ws = res && res.warnings;
+        if (ws && ws.length) toast(ws.join(" "), "warn", 5200);
+        await refreshMtprotoState(state);
+      } catch (e) {
+        toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3200);
+        await refreshMtprotoState(state);
+      }
+    });
+  }
+
   $("mtpUserModalCloseBtn").addEventListener("click", () => {
     setUserFormStatus("");
     $("mtpUserModalOverlay").classList.add("hidden");
@@ -899,11 +992,14 @@ function initMtprotoPanel(state) {
 
   $("mtpConfigSaveBtn").addEventListener("click", async () => {
     try {
-      await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
+      const res = await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
       setStatusById("mtpConfigStatus", "dot--ok", "сохранено");
       $("mtpConfigModalOverlay").classList.add("hidden");
       await refreshMtprotoState(state);
       toast("config.toml сохранен.", "ok");
+      const sync = res && res.mtproto_sync;
+      if (sync && sync.warnings && sync.warnings.length) toast(sync.warnings.join(" "), "warn", 5200);
+      if (sync && !sync.ok && sync.error) toast(sync.error, "error", 3800);
     } catch {
       setStatusById("mtpConfigStatus", "dot--bad", "ошибка сохранения");
       toast("Ошибка сохранения config.toml.", "error", 2200);
@@ -1024,7 +1120,9 @@ function initInterfaceSave() {
       }
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
+      if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
       await refreshDnsPanel();
+      if (window.__awgState) await refreshMtprotoState(window.__awgState);
     } catch (e) {
       setStatusById("egressStatus", "dot--bad", "ошибка применения");
       setStatusById("ingressStatus", "dot--bad", "ошибка применения");
@@ -1383,6 +1481,8 @@ function initRoutingPanel(state) {
       if (!options.silent) toast(state.routeMode === "tunnel" ? "Режим туннеля применен." : "Режим egress применен.", "ok");
       refreshGeoUi();
       await refreshDnsPanel();
+      if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
+      await refreshMtprotoState(state);
     } catch (e) {
       setRouteModeStatus(mode, false);
       if (!options.silent) toast(`Ошибка применения режима: ${e?.message || "unknown"}`, "error", 2800);
@@ -1429,8 +1529,10 @@ function initRoutingPanel(state) {
       }
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
       toast("Georouting применен. Сервисы обновления списков перезапущены.", "ok", 2600);
+      if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
       refreshGeoUi();
       await refreshDnsPanel();
+      await refreshMtprotoState(state);
       try {
         const d = await fetchJson("/api/dns/config");
         const wr = d && d.amnezia_dns_watch;

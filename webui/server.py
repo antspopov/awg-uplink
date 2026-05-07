@@ -292,6 +292,180 @@ def _replace_disabled_users_section(cfg_text: str, users: dict[str, str]) -> str
     return _replace_named_section(cfg_text, "access.disabled_users", users)
 
 
+def _toml_remove_upstream_tree(text: str) -> str:
+    """Drop [upstream] and every [upstream.*] subsection (socks5/http/tunnel/…)."""
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            sec = stripped[1:-1].strip()
+            if sec == "upstream" or sec.startswith("upstream."):
+                i += 1
+                while i < n:
+                    s2 = lines[i].strip()
+                    if s2.startswith("[") and s2.endswith("]"):
+                        break
+                    i += 1
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _toml_insert_before_section(text: str, before_section: str, block: str) -> str:
+    lines = text.splitlines()
+    anchor = f"[{before_section}]"
+    block_lines = [ln for ln in block.strip().splitlines()]
+    if not block_lines:
+        return text
+    for i, line in enumerate(lines):
+        if line.strip() == anchor:
+            new_lines = lines[:i] + block_lines + [""] + lines[i:]
+            return "\n".join(new_lines).rstrip() + "\n"
+    sep = "" if text.endswith("\n") or not text.strip() else "\n"
+    return text.rstrip() + sep + "\n".join(block_lines) + "\n"
+
+
+def _patch_mtproto_upstream_cfg(cfg_text: str, mode: str, egress_dev: str, tunnel_iface: str) -> str:
+    """mtproto.zig [upstream]: direct | tunnel+interface (egress или тунельный интерфейс)."""
+    m = str(mode or "").strip().lower()
+    cleaned = _toml_remove_upstream_tree(cfg_text)
+    if m == "direct":
+        block = '[upstream]\ntype = "direct"'
+    else:
+        iface = (
+            str(egress_dev or "").strip()
+            if m == "egress"
+            else (str(tunnel_iface or "").strip() or "awg-uplink")
+        )
+        block = f'[upstream]\ntype = "tunnel"\n\n[upstream.tunnel]\ninterface = "{iface}"'
+    for anchor in ("censorship", "access.users", "monitor", "metrics"):
+        if f"[{anchor}]" in cleaned:
+            return _toml_insert_before_section(cleaned, anchor, block)
+    sep = "\n" if cleaned.strip() else ""
+    return cleaned.rstrip() + sep + block + "\n"
+
+
+def _iface_split_active(iface: dict) -> bool:
+    egress_dev = str(iface.get("egress_dev", "")).strip()
+    egress_ip = str(iface.get("egress_ip", "")).strip()
+    ingress_dev = str(iface.get("ingress_dev", "")).strip()
+    ingress_ip = str(iface.get("ingress_ip", "")).strip()
+    return bool(ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev))
+
+
+def _mtproto_public_ip_from_iface(iface: dict) -> str:
+    """Публичный адрес для ссылок: ingress при split, иначе egress (egress = ingress)."""
+    egress_ip = str(iface.get("egress_ip", "")).strip()
+    ingress_ip = str(iface.get("ingress_ip", "")).strip()
+    if not _iface_split_active(iface):
+        return egress_ip
+    return ingress_ip
+
+
+def _mtproto_middle_nat_from_iface(iface: dict) -> str:
+    return str(iface.get("egress_ip", "")).strip()
+
+
+def _ipv4_literal_ok(s: str) -> bool:
+    try:
+        ipaddress.IPv4Address(str(s).strip())
+        return True
+    except Exception:
+        return False
+
+
+def _infer_mtproto_outbound_mode(parsed: dict, iface: dict) -> str:
+    up = parsed.get("upstream", {})
+    if not isinstance(up, dict):
+        return "direct"
+    typ = str(up.get("type", "auto") or "auto").strip().lower()
+    if typ == "direct":
+        return "direct"
+    if typ != "tunnel":
+        return "direct"
+    tun = parsed.get("upstream.tunnel", {})
+    if not isinstance(tun, dict):
+        return "tunnel"
+    ifname = str(tun.get("interface", "") or "").strip()
+    egress_dev = str(iface.get("egress_dev", "")).strip()
+    ingress_dev = str(iface.get("ingress_dev", "")).strip()
+    if egress_dev and ifname == egress_dev:
+        return "egress"
+    if ifname == ingress_dev or ifname == "awg-uplink":
+        return "tunnel"
+    return "tunnel"
+
+
+def _effective_mtproto_outbound_mode(prefs: dict, cfg_text: str, iface: dict) -> str:
+    raw = str(prefs.get("outbound_mode", "")).strip().lower()
+    if raw in ("direct", "egress", "tunnel"):
+        return raw
+    leg = str(prefs.get("upstream_target", "")).strip().lower()
+    if leg == "tunnel":
+        return "tunnel"
+    if leg == "egress":
+        return "direct"
+    if cfg_text.strip():
+        return _infer_mtproto_outbound_mode(_parse_simple_toml(cfg_text), iface)
+    return "direct"
+
+
+def _toml_merge_keys_in_section(cfg_text: str, section: str, string_values: dict[str, str]) -> str:
+    """Задать строковые ключи в [section]; пустое значение — ключ не трогаем."""
+    sec_header = f"[{section}]"
+    lines = cfg_text.splitlines()
+    start = -1
+    end = len(lines)
+    for i, line in enumerate(lines):
+        if line.strip() == sec_header:
+            start = i
+            break
+    to_set = {k: v.strip() for k, v in string_values.items() if str(v).strip()}
+    if not to_set:
+        return cfg_text if cfg_text.endswith("\n") else (cfg_text + "\n")
+
+    def fmt_line(key: str, val: str) -> str:
+        return f'{key} = "{val}"'
+
+    if start == -1:
+        block = [sec_header] + [fmt_line(k, v) for k, v in sorted(to_set.items())]
+        sep = "\n" if cfg_text.strip() and not cfg_text.endswith("\n") else "\n"
+        base = cfg_text.rstrip()
+        return base + sep + "\n".join(block) + "\n"
+
+    for j in range(start + 1, len(lines)):
+        s = lines[j].strip()
+        if s.startswith("[") and s.endswith("]"):
+            end = j
+            break
+
+    sec_body = lines[start + 1 : end]
+    replaced = {k: False for k in to_set}
+    key_patterns = {k: re.compile(rf"^\s*{re.escape(k)}\s*=") for k in to_set}
+    new_body: list[str] = []
+    for line in sec_body:
+        raw_key = line.split("#", 1)[0].strip()
+        hit = None
+        for k, rx in key_patterns.items():
+            if raw_key and rx.match(raw_key):
+                hit = k
+                break
+        if hit is not None:
+            new_body.append(fmt_line(hit, to_set[hit]))
+            replaced[hit] = True
+        else:
+            new_body.append(line)
+    for k in sorted(to_set.keys()):
+        if not replaced[k]:
+            new_body.append(fmt_line(k, to_set[k]))
+    out = lines[:start] + [sec_header] + new_body + lines[end:]
+    return "\n".join(out).rstrip() + "\n"
+
+
 class WebUIHandler(SimpleHTTPRequestHandler):
     server_version = "awg-uplink-webui/0.2"
 
@@ -1325,6 +1499,108 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _mtproto_service_name(self) -> str:
         return os.environ.get("AWG_MTPROTO_SERVICE", "mtproto-proxy")
 
+    def _mtproto_prefs_path(self) -> str:
+        return str(Path(self._webui_cfg_dir()) / "mtproto.json")
+
+    def _load_mtproto_prefs(self) -> dict:
+        raw = _read_text(self._mtproto_prefs_path(), "")
+        if not raw.strip():
+            return {}
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+
+    def _store_mtproto_prefs(self, prefs: dict):
+        cur = self._load_mtproto_prefs()
+        if isinstance(prefs, dict):
+            cur.update(prefs)
+        om = str(cur.get("outbound_mode", "")).strip().lower()
+        if om not in ("direct", "egress", "tunnel"):
+            cur.pop("outbound_mode", None)
+        else:
+            cur["outbound_mode"] = om
+        cur.pop("upstream_target", None)
+        _mkdir(self._webui_cfg_dir())
+        _write_text(self._mtproto_prefs_path(), json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
+
+    def _tunnel_iface_for_mtproto(self) -> str:
+        cfg = self._load_iface_config()
+        ing = str(cfg.get("ingress_dev", "")).strip()
+        return ing or "awg-uplink"
+
+    def _sync_mtproto_derived_config(
+        self,
+        *,
+        persist_outbound_mode: str | None = None,
+        apply_upstream: bool = True,
+    ) -> dict:
+        cfg_path = self._mtproto_config_path()
+        cfg_text = _read_text(cfg_path, "")
+        if not cfg_text.strip():
+            return {"ok": True, "skipped": True, "reason": "no mtproto config"}
+        iface = self._load_iface_config()
+        if persist_outbound_mode is not None:
+            pm = str(persist_outbound_mode).strip().lower()
+            if pm in ("direct", "egress", "tunnel"):
+                self._store_mtproto_prefs({"outbound_mode": pm})
+        prefs = self._load_mtproto_prefs()
+        mode = _effective_mtproto_outbound_mode(prefs, cfg_text, iface)
+        warnings: list[str] = []
+        egress_dev = str(iface.get("egress_dev", "")).strip()
+        tunnel_if = self._tunnel_iface_for_mtproto()
+        new_text = cfg_text
+        if apply_upstream:
+            if mode == "egress" and not egress_dev:
+                warnings.append(
+                    "Режим Egress: не задан egress_dev в настройках интерфейсов — секция [upstream] не менялась."
+                )
+            else:
+                new_text = _patch_mtproto_upstream_cfg(new_text, mode, egress_dev, tunnel_if)
+        pub = _mtproto_public_ip_from_iface(iface)
+        mid = _mtproto_middle_nat_from_iface(iface)
+        server_updates: dict[str, str] = {}
+        if pub:
+            server_updates["public_ip"] = pub
+        if mid and _ipv4_literal_ok(mid):
+            server_updates["middle_proxy_nat_ip"] = mid
+        if server_updates:
+            new_text = _toml_merge_keys_in_section(new_text, "server", server_updates)
+        try:
+            _write_text(cfg_path, new_text)
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+        _run(["chown", "mtproto:mtproto", cfg_path], timeout=2.0)
+        svc = self._mtproto_service_name()
+        rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
+        resp: dict = {
+            "ok": rc == 0,
+            "mode": mode,
+            "warnings": warnings,
+            "public_ip": pub,
+            "middle_proxy_nat_ip": server_updates.get("middle_proxy_nat_ip", ""),
+        }
+        if rc != 0:
+            resp["error"] = (err or out or "restart failed").strip()
+        if mode == "tunnel" and not self._tunnel_iface_up():
+            warnings.append("Интерфейс awg-uplink не UP — проверьте VPN.")
+        resp["warnings"] = warnings
+        return resp
+
+    def _maybe_sync_mtproto_after_iface_change(self) -> str:
+        """Возвращает предупреждение или пусто."""
+        try:
+            r = self._sync_mtproto_derived_config()
+            if r.get("skipped"):
+                return ""
+            if not r.get("ok"):
+                return str(r.get("error", "")).strip() or "mtproto sync failed"
+            ws = r.get("warnings") or []
+            return " ".join(str(x) for x in ws if x).strip()
+        except Exception as ex:
+            return str(ex)
+
     def _unit_state(self, unit_name: str) -> dict:
         name = str(unit_name or "").strip()
         if not name:
@@ -1555,6 +1831,25 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             m_endpoint_ok = masking_ok
             masking_overall_ok = bool(masking_ok and nginx_state["ok"] and timer_state["ok"])
 
+        iface_rt = self._load_iface_config()
+        prefs = self._load_mtproto_prefs()
+        inferred_mode = _infer_mtproto_outbound_mode(parsed, iface_rt)
+        ui_mode = _effective_mtproto_outbound_mode(prefs, cfg_text, iface_rt)
+        persisted_om = str(prefs.get("outbound_mode", "")).strip().lower()
+        persisted_display = persisted_om if persisted_om in ("direct", "egress", "tunnel") else ""
+        up_sec_p = parsed.get("upstream", {})
+        cfg_upstream_type = ""
+        if isinstance(up_sec_p, dict):
+            cfg_upstream_type = str(up_sec_p.get("type", "") or "").strip().lower()
+        tunnel_sec_p = parsed.get("upstream.tunnel", {})
+        tunnel_if_cfg = ""
+        if isinstance(tunnel_sec_p, dict):
+            tunnel_if_cfg = str(tunnel_sec_p.get("interface", "") or "").strip()
+        effective_tunnel_iface = self._tunnel_iface_for_mtproto()
+        pub_derived = _mtproto_public_ip_from_iface(iface_rt)
+        mid_raw = _mtproto_middle_nat_from_iface(iface_rt)
+        mid_derived = mid_raw if _ipv4_literal_ok(mid_raw) else ""
+
         return self._send_json(
             200,
             {
@@ -1569,6 +1864,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "links_raw": links_raw,
                 "server": {
                     "public_ip": server_sec.get("public_ip", ""),
+                    "middle_proxy_nat_ip": str(server_sec.get("middle_proxy_nat_ip", "") or ""),
                     "port": int(server_sec.get("port", 443) or 443),
                 },
                 "censorship": {
@@ -1579,6 +1875,19 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "monitor": {
                     "host": monitor_host,
                     "port": monitor_port,
+                },
+                "upstream": {
+                    "mode": ui_mode,
+                    "persisted_mode": persisted_display,
+                    "inferred_mode": inferred_mode,
+                    "config_type": cfg_upstream_type,
+                    "tunnel_interface_config": tunnel_if_cfg,
+                    "tunnel_interface_effective": effective_tunnel_iface,
+                    "egress_dev": str(iface_rt.get("egress_dev", "") or ""),
+                    "ingress_dev": str(iface_rt.get("ingress_dev", "") or ""),
+                    "public_ip_derived": pub_derived,
+                    "middle_proxy_nat_ip_derived": mid_derived,
+                    "tunnel_iface_up": self._tunnel_iface_up(),
                 },
                 "service": {
                     "name": service_name,
@@ -1881,6 +2190,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             }
             if route_mode_warning:
                 resp["warning"] = route_mode_warning
+            mt_extra = self._maybe_sync_mtproto_after_iface_change()
+            if mt_extra:
+                resp["mtproto_sync_warning"] = mt_extra
             return self._send_json(200, resp)
 
         if sp == "/api/net/routing/mode":
@@ -1913,7 +2225,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
             except Exception:
                 pass
-            return self._send_json(200, {"ok": True, "config": cfg, "runtime": runtime})
+            mt_extra = self._maybe_sync_mtproto_after_iface_change()
+            out = {"ok": True, "config": cfg, "runtime": runtime}
+            if mt_extra:
+                out["mtproto_sync_warning"] = mt_extra
+            return self._send_json(200, out)
 
         if sp == "/api/dns/save":
             if self._auth_enabled and not self._session_user():
@@ -2024,6 +2340,19 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 resp["routing_apply_error"] = routing_err
             return self._send_json(200, resp)
 
+        if sp == "/api/mtproto/outbound/set":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            mode = str(body.get("mode", "")).strip().lower()
+            if mode not in ("direct", "egress", "tunnel"):
+                return self._send_text(400, "mode must be direct|egress|tunnel")
+            cfg_path = self._mtproto_config_path()
+            if not _read_text(cfg_path, "").strip():
+                return self._send_text(400, "mtproto config missing")
+            res = self._sync_mtproto_derived_config(persist_outbound_mode=mode, apply_upstream=True)
+            return self._send_json(200, res)
+
         if sp == "/api/mtproto/config/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
@@ -2031,8 +2360,13 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cfg_text = str(body.get("config_text", ""))
             if not cfg_text.strip():
                 return self._send_text(400, "config_text is empty")
-            _write_text(self._mtproto_config_path(), cfg_text)
-            return self._send_json(200, {"ok": True})
+            cfg_path = self._mtproto_config_path()
+            try:
+                _write_text(cfg_path, cfg_text)
+            except OSError as e:
+                return self._send_text(500, f"failed to write config: {e}")
+            sync = self._sync_mtproto_derived_config(apply_upstream=False)
+            return self._send_json(200, {"ok": True, "mtproto_sync": sync})
 
         if sp == "/api/mtproto/users/upsert":
             if self._auth_enabled and not self._session_user():

@@ -147,6 +147,7 @@ Installs AWG Web UI runtime:
   - systemd units: $WEBUI_SERVICE, $IFACE_SERVICE
   - config dir: $CFG_DIR
   - env file: $CFG_DIR/webui.env
+
 EOF
 }
 
@@ -185,9 +186,9 @@ done
 [[ -f "$SYSTEMD_SRC/dnscrypt-proxy.service" ]] || die "missing dnscrypt-proxy systemd unit (awg-uplink override)"
 
 if command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy)..."
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl >/dev/null
 fi
 
 ensure_amneziawg

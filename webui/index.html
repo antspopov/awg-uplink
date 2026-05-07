@@ -519,6 +519,28 @@
                 <button class="btn" id="mtpOpenConfigBtn" type="button">Правка config.toml</button>
               </div>
             </div>
+            <div class="mtp-config-extras">
+              <div class="row">
+                <div class="field">
+                  <label>Исходящий интерфейс</label>
+                  <select id="mtpOutboundMode">
+                    <option value="direct">direct</option>
+                    <option value="egress">Egress</option>
+                    <option value="tunnel">Тунельный интерфейс</option>
+                  </select>
+                </div>
+              </div>
+              <div class="users-meta" id="mtpOutboundMeta"></div>
+              <div class="help">
+                <code>direct</code> — в конфиге <code>[upstream] type = "direct"</code>. <code>Egress</code> и
+                <code>Тунельный интерфейс</code> — <code>type = "tunnel"</code> с <code>interface</code> из выбранного режима (имя
+                egress или ingress из «Настройка интерфейсов», для тунеля при пустом ingress — <code>awg-uplink</code>). При смене
+                списка конфиг обновляется и прокси перезапускается; в <code>[server]</code> выставляются <code>public_ip</code>
+                (ingress или egress при совпадении интерфейсов) и <code>middle_proxy_nat_ip</code> (IPv4 egress). Полная правка
+                <code>config.toml</code> тоже подтягивает эти поля без перезаписи <code>[upstream]</code>. Сохранение интерфейсов в
+                другой карточке синхронизирует MTProto автоматически.
+              </div>
+            </div>
           </div>
         </section>
       </main>
@@ -651,7 +673,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260507-3"></script>
+    <script src="./app.js?v=20260507-5"></script>
   </body>
 </html>
 

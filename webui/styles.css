@@ -353,6 +353,12 @@ body::before {
   margin-top: 14px;
 }
 
+.mtproto-config-card .mtp-config-extras {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .geo-routing-settings-card {
   margin-top: 18px;
 }

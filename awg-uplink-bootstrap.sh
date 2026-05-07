@@ -703,8 +703,47 @@ PY
 	log "MTProto: в config.toml включён drs = true ([censorship])"
 }
 
+# mtbuddy вызывает groupadd/useradd; предварительно создаём системные группу/пользователя mtproto (см. lib/awg-webui-mtproto-bootstrap.sh).
+ensure_mtproto_system_ids() {
+	if getent group mtproto >/dev/null 2>&1; then
+		:
+	elif command -v groupadd >/dev/null 2>&1; then
+		groupadd --system mtproto \
+			|| die "не удалось создать системную группу mtproto (groupadd --system). Проверьте /etc/group и доступность записи в /etc."
+	elif command -v addgroup >/dev/null 2>&1; then
+		addgroup -S mtproto || die "не удалось addgroup -S mtproto"
+	else
+		die "нет groupadd/addgroup — установите shadow/passwd или создайте группу mtproto вручную"
+	fi
+
+	if getent passwd mtproto >/dev/null 2>&1; then
+		return 0
+	fi
+	if command -v useradd >/dev/null 2>&1; then
+		if useradd --system --gid mtproto --home /nonexistent --shell /usr/sbin/nologin --no-create-home mtproto 2>/dev/null; then
+			log "MTProto: создан системный пользователь mtproto"
+			return 0
+		fi
+		if useradd --system --gid mtproto --shell /sbin/nologin --no-create-home --home-dir /nonexistent mtproto 2>/dev/null; then
+			log "MTProto: создан системный пользователь mtproto"
+			return 0
+		fi
+		if useradd -r -g mtproto -d /nonexistent -s /sbin/nologin -M mtproto 2>/dev/null; then
+			log "MTProto: создан системный пользователь mtproto"
+			return 0
+		fi
+		die "не удалось создать пользователя mtproto (useradd)"
+	elif command -v adduser >/dev/null 2>&1; then
+		adduser -S -G mtproto -H -h /nonexistent -s /sbin/nologin mtproto \
+			|| die "не удалось adduser mtproto"
+	else
+		die "нет useradd/adduser"
+	fi
+}
+
 run_mtbuddy_install() {
 	command -v curl >/dev/null 2>&1 || die "нужен curl для загрузки mtbuddy"
+	ensure_mtproto_system_ids
 	if ! command -v minisign >/dev/null 2>&1; then
 		log "MTProto: устанавливаю minisign для проверки подписи релизов mtbuddy…"
 		export DEBIAN_FRONTEND=noninteractive
