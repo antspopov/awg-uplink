@@ -283,6 +283,8 @@ function setRouteModeStatus(mode, applied = true) {
     setStatusById("routingModeStatus", "dot--ok", "применено: весь трафик в туннель");
   } else if (mode === "egress") {
     setStatusById("routingModeStatus", "dot--ok", "применено: маршрутизируем в egress");
+  } else if (mode === "georouting") {
+    setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
   } else {
     setStatusById("routingModeStatus", "dot--warn", `не применено: ${routeModeLabel(mode)}`);
   }
@@ -679,10 +681,30 @@ async function initNetworkForm(state) {
     }
     if (cfg.ingress_ip) $("ingressIp").value = cfg.ingress_ip;
     if (typeof cfg.ingress_gw === "string") $("ingressGw").value = cfg.ingress_gw;
-    if (cfg.route_mode) state.routeMode = cfg.route_mode;
+    if (cfg.route_mode) {
+      state.routeMode = cfg.route_mode;
+      state.persistedRouteMode = cfg.route_mode;
+    }
+    if (cfg.geo && typeof cfg.geo === "object") {
+      const g = cfg.geo;
+      state.geo.target = g.target === "egress" ? "egress" : "tunnel";
+      state.geo.ipMode = Boolean(g.ipMode);
+      state.geo.domainMode = Boolean(g.domainMode);
+      if (g.readyLinks && typeof g.readyLinks === "object") {
+        if (Array.isArray(g.readyLinks.ip)) state.geo.readyLinks.ip = g.readyLinks.ip;
+        if (Array.isArray(g.readyLinks.domain)) state.geo.readyLinks.domain = g.readyLinks.domain;
+      }
+      if (g.lists && typeof g.lists === "object") {
+        state.geo.lists.ipInclude = String(g.lists.ipInclude || "");
+        state.geo.lists.ipExclude = String(g.lists.ipExclude || "");
+        state.geo.lists.domainInclude = String(g.lists.domainInclude || "");
+        state.geo.lists.domainExclude = String(g.lists.domainExclude || "");
+      }
+    }
+    commitSavedGeoFingerprint(state, state.geo);
     refreshInterfaceStatuses(saved && saved.runtime ? saved.runtime : null);
   } catch {
-    // no saved routing config yet
+    commitSavedGeoFingerprint(state, state.geo);
   }
 }
 
@@ -720,6 +742,7 @@ function initInterfaceSave() {
       ingress_ip: $("ingressIp").value,
       ingress_gw: $("ingressGw").value.trim(),
       route_mode: window.__awgState && window.__awgState.routeMode ? window.__awgState.routeMode : "egress",
+      geo: window.__awgState && window.__awgState.geo ? window.__awgState.geo : {},
     };
     if (!body.egress_dev || !body.egress_ip) {
       toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
@@ -731,6 +754,12 @@ function initInterfaceSave() {
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
       if (res && res.config && res.config.route_mode && window.__awgState) {
         window.__awgState.routeMode = res.config.route_mode;
+        window.__awgState.persistedRouteMode = res.config.route_mode;
+      }
+      if (res && res.config && res.config.geo && window.__awgState) {
+        commitSavedGeoFingerprint(window.__awgState, res.config.geo);
+      } else if (window.__awgState) {
+        commitSavedGeoFingerprint(window.__awgState, window.__awgState.geo);
       }
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
@@ -800,12 +829,75 @@ function routeModeLabel(mode) {
   return "в egress";
 }
 
+/** Сравнение geo без volatile полей (status списков после обновления таймером). */
+function normalizeGeoReadyEntry(entry) {
+  if (typeof entry === "string") {
+    return { url: entry, enabled: true };
+  }
+  if (!entry || typeof entry !== "object") {
+    return { url: "", enabled: true };
+  }
+  return {
+    url: String(entry.url || ""),
+    enabled: entry.enabled !== false,
+  };
+}
+
+/** Строка-снимок «что считается сохранёнными настройками» для сравнения с UI. */
+function geoSettingsFingerprint(geo) {
+  if (!geo || typeof geo !== "object") return "{}";
+  const lists = geo.lists || {};
+  const ipRaw = Array.isArray(geo.readyLinks?.ip) ? geo.readyLinks.ip : [];
+  const domRaw = Array.isArray(geo.readyLinks?.domain) ? geo.readyLinks.domain : [];
+  const ip = ipRaw.map(normalizeGeoReadyEntry).sort((a, b) => a.url.localeCompare(b.url));
+  const domain = domRaw.map(normalizeGeoReadyEntry).sort((a, b) => a.url.localeCompare(b.url));
+  const payload = {
+    target: geo.target === "egress" ? "egress" : "tunnel",
+    ipMode: Boolean(geo.ipMode),
+    domainMode: Boolean(geo.domainMode),
+    lists: {
+      ipInclude: String(lists.ipInclude || ""),
+      ipExclude: String(lists.ipExclude || ""),
+      domainInclude: String(lists.domainInclude || ""),
+      domainExclude: String(lists.domainExclude || ""),
+    },
+    readyLinks: { ip, domain },
+  };
+  return JSON.stringify(payload);
+}
+
+function commitSavedGeoFingerprint(state, geoLike) {
+  const src = geoLike && typeof geoLike === "object" ? geoLike : state.geo;
+  state.savedGeoFingerprint = geoSettingsFingerprint(src);
+}
+
+/** Подтянуть status с сервера (обновляет geo-ip-refresh в georouting.json), не трогая url/enabled. */
+function mergeReadyLinkStatusesFromServer(intoGeo, fromGeo) {
+  if (!intoGeo || !fromGeo || !fromGeo.readyLinks || typeof fromGeo.readyLinks !== "object") return;
+  const pairs = [
+    [intoGeo.readyLinks?.ip, fromGeo.readyLinks.ip],
+    [intoGeo.readyLinks?.domain, fromGeo.readyLinks.domain],
+  ];
+  for (const [locArr, remArr] of pairs) {
+    if (!Array.isArray(locArr) || !Array.isArray(remArr)) continue;
+    for (const loc of locArr) {
+      const u = String(loc.url || "");
+      if (!u) continue;
+      const rem = remArr.find((x) => String(x.url || "") === u);
+      if (rem && typeof rem.status === "string") {
+        loc.status = rem.status;
+      }
+    }
+  }
+}
+
 function initRoutingPanel(state) {
   const root = $("routingModes");
   const geoFieldset = $("geoRoutingFieldset");
   const geoTarget = $("geoRouteTarget");
   const geoIpModeBtn = $("geoIpModeBtn");
   const geoDomainModeBtn = $("geoDomainModeBtn");
+  const geoApplyBtn = $("geoApplyBtn");
   const geoListModalOverlay = $("geoListModalOverlay");
   const geoListModalTitle = $("geoListModalTitle");
   const geoListText = $("geoListText");
@@ -883,8 +975,12 @@ function initRoutingPanel(state) {
     geoFieldset.disabled = !geoSelected;
     if (!geoSelected) {
       setStatusById("geoRoutingStatus", "dot--unknown", "выберите режим georouting");
-    } else {
+    } else if (state.persistedRouteMode !== "georouting") {
       setStatusById("geoRoutingStatus", "dot--warn", "не применено");
+    } else if (geoSettingsFingerprint(state.geo) !== state.savedGeoFingerprint) {
+      setStatusById("geoRoutingStatus", "dot--warn", "не применено: есть несохранённые изменения");
+    } else {
+      setStatusById("geoRoutingStatus", "dot--ok", "применено");
     }
 
     geoTarget.value = state.geo.target;
@@ -901,6 +997,7 @@ function initRoutingPanel(state) {
     geoLists.domainExclude.disabled = !(geoSelected && state.geo.domainMode);
     geoReady.ipAdd.disabled = !(geoSelected && state.geo.ipMode);
     geoReady.domainAdd.disabled = !(geoSelected && state.geo.domainMode);
+    geoApplyBtn.disabled = !geoSelected;
     refreshReadyStatus("ip");
     refreshReadyStatus("domain");
   }
@@ -981,7 +1078,11 @@ function initRoutingPanel(state) {
         const active = btn.getAttribute("data-route-mode") === mode;
         btn.classList.toggle("is-active", active);
       }
-      setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+      if (state.persistedRouteMode === "georouting") {
+        setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
+      } else {
+        setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+      }
       refreshGeoUi();
       return;
     }
@@ -989,6 +1090,10 @@ function initRoutingPanel(state) {
     try {
       const res = await postJson("/api/net/routing/mode", { route_mode: mode });
       state.routeMode = (res && res.config && res.config.route_mode) || mode;
+      state.persistedRouteMode = state.routeMode;
+      if (res && res.config && res.config.geo) {
+        commitSavedGeoFingerprint(state, res.config.geo);
+      }
       for (const btn of root.querySelectorAll(".routing-mode-btn")) {
         const active = btn.getAttribute("data-route-mode") === state.routeMode;
         btn.classList.toggle("is-active", active);
@@ -1002,6 +1107,52 @@ function initRoutingPanel(state) {
     }
   };
 
+  async function applyGeoRouting() {
+    if (state.routeMode !== "georouting") return;
+    const btn = geoApplyBtn;
+    try {
+      btn.disabled = true;
+      // Reuse the same API as interface save to persist geo config + apply base routing + refresh services.
+      const body = {
+        egress_dev: $("egressDev").value,
+        egress_ip: $("egressIp").value,
+        egress_gw: $("egressGw").value.trim(),
+        ingress_dev: $("ingressDev").value,
+        ingress_ip: $("ingressIp").value,
+        ingress_gw: $("ingressGw").value.trim(),
+        route_mode: "georouting",
+        geo: state.geo || {},
+        apply_geo_ip_refresh: true,
+      };
+      if (!body.egress_dev || !body.egress_ip) {
+        toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
+        return;
+      }
+      const res = await postJson("/api/net/routing/save", body);
+      state.routeMode = (res && res.config && res.config.route_mode) || "georouting";
+      state.persistedRouteMode = state.routeMode;
+      for (const b of root.querySelectorAll(".routing-mode-btn")) {
+        const active = b.getAttribute("data-route-mode") === state.routeMode;
+        b.classList.toggle("is-active", active);
+      }
+      setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
+      if (res && res.config && res.config.geo) {
+        commitSavedGeoFingerprint(state, res.config.geo);
+      } else {
+        commitSavedGeoFingerprint(state, state.geo);
+      }
+      refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
+      toast("Georouting применен. Сервисы обновления списков перезапущены.", "ok", 2600);
+      refreshGeoUi();
+    } catch (e) {
+      setStatusById("routingModeStatus", "dot--bad", "georouting: ошибка применения");
+      toast(`Ошибка применения georouting: ${e?.message || "unknown"}`, "error", 3200);
+      refreshGeoUi();
+    } finally {
+      btn.disabled = state.routeMode !== "georouting";
+    }
+  }
+
   root.addEventListener("click", (ev) => {
     if (!state.tunnelUp) return;
     const t = ev.target;
@@ -1012,8 +1163,11 @@ function initRoutingPanel(state) {
     applyMode(mode);
   });
 
+  geoApplyBtn.addEventListener("click", applyGeoRouting);
+
   geoTarget.addEventListener("change", () => {
     state.geo.target = geoTarget.value || "tunnel";
+    refreshGeoUi();
   });
   geoIpModeBtn.addEventListener("click", () => {
     if (state.routeMode !== "georouting") return;
@@ -1040,7 +1194,12 @@ function initRoutingPanel(state) {
     if (!key) return;
     state.geo.lists[key] = geoListText.value || "";
     closeGeoListModal();
-    toast("Список сохранен (локально).", "ok");
+    toast(
+      "Список сохранен локально. Нажмите «Применить», чтобы сохранить изменения на сервере.",
+      "ok",
+      3200
+    );
+    refreshGeoUi();
   });
 
   function addReadyLink(kind) {
@@ -1056,7 +1215,12 @@ function initRoutingPanel(state) {
     geoReadyModal.input.value = "";
     refreshReadyStatus(kind);
     renderReadyModal(kind);
-    toast("Список добавлен.", "ok");
+    toast(
+      "Список добавлен. Нажмите «Применить», чтобы сохранить изменения на сервере.",
+      "ok",
+      3200
+    );
+    refreshGeoUi();
   }
   geoReady.ipAdd.addEventListener("click", () => openReadyModal("ip"));
   geoReady.domainAdd.addEventListener("click", () => openReadyModal("domain"));
@@ -1082,6 +1246,7 @@ function initRoutingPanel(state) {
         if (item.enabled !== false && item.status !== "с ошибкой") item.status = "на проверке";
         refreshReadyStatus(kind);
         renderReadyModal(kind);
+        refreshGeoUi();
       }
       return;
     }
@@ -1094,7 +1259,12 @@ function initRoutingPanel(state) {
       target.splice(idx, 1);
       refreshReadyStatus(kind);
       renderReadyModal(kind);
-      toast("Список удален.", "ok");
+      toast(
+        "Список удален. Нажмите «Применить», чтобы сохранить изменения на сервере.",
+        "ok",
+        3200
+      );
+      refreshGeoUi();
     }
   });
 
@@ -1106,11 +1276,36 @@ function initRoutingPanel(state) {
   if (!state.tunnelUp) {
     setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
   } else if (startMode === "georouting") {
-    setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+    if (state.persistedRouteMode === "georouting") {
+      setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
+    } else {
+      setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+    }
   } else {
     setRouteModeStatus(startMode, true);
   }
   refreshGeoUi();
+
+  async function pollGeoReadyLinkStatuses() {
+    if (state.routeMode !== "georouting" && state.persistedRouteMode !== "georouting") return;
+    try {
+      const saved = await fetchJson("/api/net/routing-config");
+      const g = saved && saved.config && saved.config.geo;
+      if (!g || typeof g !== "object") return;
+      mergeReadyLinkStatusesFromServer(state.geo, g);
+      refreshReadyStatus("ip");
+      refreshReadyStatus("domain");
+      const ek = state.geo.editingReadyKind;
+      if (ek && !geoReadyModal.overlay.classList.contains("hidden")) {
+        renderReadyModal(ek === "domain" ? "domain" : "ip");
+      }
+      refreshGeoUi();
+    } catch {
+      /* transient errors */
+    }
+  }
+  setInterval(pollGeoReadyLinkStatuses, 15000);
+  setTimeout(pollGeoReadyLinkStatuses, 2500);
 }
 
 async function logout() {
@@ -1127,6 +1322,8 @@ async function main() {
     mtproto: null,
     tunnelUp: false,
     routeMode: "egress",
+    persistedRouteMode: "egress",
+    savedGeoFingerprint: "",
     geo: {
       target: "tunnel",
       ipMode: false,

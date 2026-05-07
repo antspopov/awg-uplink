@@ -435,6 +435,47 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _webui_iface_env(self) -> str:
         return str(Path(self._webui_cfg_dir()) / "interfaces.env")
 
+    def _webui_geo_json(self) -> str:
+        return str(Path(self._webui_cfg_dir()) / "georouting.json")
+
+    def _normalize_geo_entry(self, item) -> dict:
+        if isinstance(item, str):
+            return {"url": item.strip(), "status": "ожидает проверки", "enabled": True, "protected": False}
+        if not isinstance(item, dict):
+            return {"url": "", "status": "ожидает проверки", "enabled": True, "protected": False}
+        return {
+            "url": str(item.get("url", "")).strip(),
+            "status": str(item.get("status", "ожидает проверки") or "ожидает проверки"),
+            "enabled": bool(item.get("enabled", True)),
+            "protected": bool(item.get("protected", False)),
+        }
+
+    def _normalize_geo_cfg(self, raw) -> dict:
+        geo = raw if isinstance(raw, dict) else {}
+        ready = geo.get("readyLinks", {}) if isinstance(geo.get("readyLinks", {}), dict) else {}
+        lists = geo.get("lists", {}) if isinstance(geo.get("lists", {}), dict) else {}
+        target = str(geo.get("target", "tunnel") or "tunnel").strip().lower()
+        if target not in ("tunnel", "egress"):
+            target = "tunnel"
+        return {
+            "target": target,
+            "ipMode": bool(geo.get("ipMode", False)),
+            "domainMode": bool(geo.get("domainMode", False)),
+            "readyLinks": {
+                "ip": [self._normalize_geo_entry(x) for x in (ready.get("ip", []) if isinstance(ready.get("ip", []), list) else [])],
+                "domain": [
+                    self._normalize_geo_entry(x)
+                    for x in (ready.get("domain", []) if isinstance(ready.get("domain", []), list) else [])
+                ],
+            },
+            "lists": {
+                "ipInclude": str(lists.get("ipInclude", "")),
+                "ipExclude": str(lists.get("ipExclude", "")),
+                "domainInclude": str(lists.get("domainInclude", "")),
+                "domainExclude": str(lists.get("domainExclude", "")),
+            },
+        }
+
     def _netplan_path(self) -> str:
         explicit = os.environ.get("AWG_WEBUI_NETPLAN_PATH", "").strip()
         if explicit:
@@ -504,13 +545,32 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return {}
         try:
             obj = json.loads(raw)
-            return obj if isinstance(obj, dict) else {}
+            if not isinstance(obj, dict):
+                return {}
+            return obj
         except Exception:
             return {}
 
+    def _load_geo_config(self) -> dict:
+        raw = _read_text(self._webui_geo_json(), "")
+        if not raw.strip():
+            return self._normalize_geo_cfg({})
+        try:
+            obj = json.loads(raw)
+            return self._normalize_geo_cfg(obj)
+        except Exception:
+            return self._normalize_geo_cfg({})
+
     def _store_iface_config(self, cfg: dict):
+        c = dict(cfg)
+        c.pop("geo", None)
         _mkdir(self._webui_cfg_dir())
-        _write_text(self._webui_iface_json(), json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        _write_text(self._webui_iface_json(), json.dumps(c, ensure_ascii=False, indent=2) + "\n")
+
+    def _store_geo_config(self, geo: dict):
+        g = self._normalize_geo_cfg(geo)
+        _mkdir(self._webui_cfg_dir())
+        _write_text(self._webui_geo_json(), json.dumps(g, ensure_ascii=False, indent=2) + "\n")
 
     def _write_iface_env(self, cfg: dict):
         egress_dev = str(cfg.get("egress_dev", "")).strip()
@@ -520,8 +580,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ingress_ip = str(cfg.get("ingress_ip", "")).strip()
         ingress_gw = str(cfg.get("ingress_gw", "")).strip()
         route_mode = str(cfg.get("route_mode", "egress") or "egress").strip().lower()
-        if route_mode not in ("egress", "tunnel"):
+        if route_mode not in ("egress", "tunnel", "georouting"):
             route_mode = "egress"
+        if route_mode == "georouting":
+            geo = cfg.get("geo", {}) if isinstance(cfg.get("geo", {}), dict) else self._load_geo_config()
+            target = str(geo.get("target", "tunnel") or "tunnel").strip().lower()
+            # If geo routes "listed resources" to tunnel => base default must be egress.
+            # If geo routes "listed resources" to egress => base default must be tunnel.
+            apply_mode = "tunnel" if target == "egress" else "egress"
+        else:
+            apply_mode = route_mode
 
         ingress_enabled = bool(
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
@@ -540,7 +608,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "INGRESS_RULE_PRIO=81",
             "EGRESS_TABLE=202",
             "EGRESS_RULE_PRIO=80",
-            f"ROUTE_MODE={shlex.quote(route_mode)}",
+            f"ROUTE_MODE={shlex.quote(apply_mode)}",
             "# Tunnel + Docker-VPN: optional (see lib/awg-uplink-policy.sh / awg-webui-iface-routing-apply.sh)",
             "# DOCKER_FORCE_PORT=39983",
             "# DOCKER_MARK_IN=amn0",
@@ -548,6 +616,23 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ]
         _mkdir(self._webui_cfg_dir())
         _write_text(self._webui_iface_env(), "\n".join(env))
+
+    def _effective_base_route_mode(self, cfg: dict) -> str:
+        route_mode = str(cfg.get("route_mode", "egress") or "egress").strip().lower()
+        if route_mode not in ("egress", "tunnel", "georouting"):
+            route_mode = "egress"
+        if route_mode != "georouting":
+            return route_mode
+        geo = cfg.get("geo", {}) if isinstance(cfg.get("geo", {}), dict) else self._load_geo_config()
+        target = str(geo.get("target", "tunnel") or "tunnel").strip().lower()
+        # See _write_iface_env mapping.
+        return "tunnel" if target == "egress" else "egress"
+
+    def _is_geo_ip_enabled(self, cfg: dict) -> bool:
+        if str(cfg.get("route_mode", "egress")).strip().lower() != "georouting":
+            return False
+        geo = cfg.get("geo", {}) if isinstance(cfg.get("geo", {}), dict) else self._load_geo_config()
+        return bool(geo.get("ipMode", False))
 
     def _install_iface_runtime(self):
         repo_root = self._repo_root()
@@ -572,6 +657,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         shutil.copyfile(script_src, script_dst)
         os.chmod(script_dst, 0o755)
         shutil.copyfile(unit_src, unit_dst)
+        geo_ip_script_src = str(repo_root / "lib" / "awg-uplink-geo-ip-refresh.py")
+        geo_ip_script_dst = "/usr/local/sbin/awg-uplink-geo-ip-refresh.py"
+        geo_ip_service_src = str(repo_root / "systemd" / "awg-uplink-geo-ip-refresh.service")
+        geo_ip_timer_src = str(repo_root / "systemd" / "awg-uplink-geo-ip-refresh.timer")
+        if not Path(geo_ip_script_src).exists() or not Path(geo_ip_service_src).exists() or not Path(geo_ip_timer_src).exists():
+            raise RuntimeError("geo-ip runtime files are missing (lib/systemd)")
+        shutil.copyfile(geo_ip_script_src, geo_ip_script_dst)
+        os.chmod(geo_ip_script_dst, 0o755)
+        shutil.copyfile(geo_ip_service_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.service")
+        shutil.copyfile(geo_ip_timer_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.timer")
 
     def _apply_iface_routing(self):
         self._install_iface_runtime()
@@ -580,6 +675,21 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         rc, out, err = _run(["systemctl", "restart", "awg-webui-ifaces.service"], timeout=5.0)
         if rc != 0:
             raise RuntimeError((err or out or "failed to restart awg-webui-ifaces.service").strip())
+
+    def _apply_geo_ip_runtime(self, cfg: dict, *, run_refresh_now: bool = True):
+        """run_refresh_now: однократный запуск awg-uplink-geo-ip-refresh.service (подтянуть списки в nft).
+        False — при сохранении interfaces без кнопки «Применить» в карточке georouting; таймер при enabled оставляем."""
+        enabled = self._is_geo_ip_enabled(cfg)
+        _run(["systemctl", "daemon-reload"], timeout=3.0)
+        if enabled:
+            _run(["systemctl", "enable", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
+            if run_refresh_now:
+                _run(["systemctl", "start", "awg-uplink-geo-ip-refresh.service"], timeout=5.0)
+            _run(["systemctl", "start", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
+        else:
+            _run(["systemctl", "stop", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "disable", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "start", "awg-uplink-geo-ip-refresh.service"], timeout=5.0)
 
     def _routing_runtime_status(self, cfg: dict) -> dict:
         egress_dev = str(cfg.get("egress_dev", "")).strip()
@@ -590,15 +700,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
         )
         route_mode = str(cfg.get("route_mode", "egress") or "egress").strip().lower()
-        if route_mode not in ("egress", "tunnel"):
+        if route_mode not in ("egress", "tunnel", "georouting"):
             route_mode = "egress"
+        effective = self._effective_base_route_mode(cfg)
 
         egress_gw = str(cfg.get("egress_gw", "")).strip()
         e_rc, e_out, _ = _run(["ip", "-4", "route", "show", "default"], timeout=2.0)
         default_lines = [ln.strip() for ln in (e_out or "").splitlines() if ln.strip()] if e_rc == 0 else []
         default_line = default_lines[0] if default_lines else ""
         egress_ok = False
-        if route_mode == "tunnel":
+        if effective == "tunnel":
             # In tunnel mode, system default must point to awg-uplink.
             egress_ok = any("dev awg-uplink" in ln for ln in default_lines)
         else:
@@ -618,7 +729,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             ingress_rule_ok = True
 
         tunnel_rule_ok = True
-        if route_mode == "tunnel":
+        if effective == "tunnel":
             t_rc, t_out, _ = _run(["ip", "-4", "rule", "show", "priority", "90"], timeout=2.0)
             tunnel_rule_ok = bool(t_rc == 0 and "lookup 203" in (t_out or ""))
 
@@ -630,9 +741,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "ingress_enabled": ingress_enabled,
             "ingress_ok": ingress_rule_ok,
             "route_mode": route_mode,
+            "effective_route_mode": effective,
             "tunnel_rule_ok": tunnel_rule_ok,
             "service": svc,
             "default_route": default_line,
+            "geo_ip_enabled": self._is_geo_ip_enabled(cfg),
         }
 
     def _validate_iface_cfg(self, cfg: dict) -> tuple[bool, str]:
@@ -1186,6 +1299,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             cfg = self._load_iface_config()
+            if isinstance(cfg, dict):
+                cfg = dict(cfg)
+                cfg["geo"] = self._load_geo_config()
             return self._send_json(
                 200,
                 {
@@ -1345,9 +1461,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ingress_ip": str(body.get("ingress_ip", "")).strip(),
                 "ingress_gw": str(body.get("ingress_gw", "")).strip(),
                 "route_mode": str(body.get("route_mode", "") or "egress").strip().lower(),
+                "geo": self._normalize_geo_cfg(body.get("geo", {})),
                 "updated_at": int(time.time()),
             }
-            if cfg["route_mode"] not in ("egress", "tunnel"):
+            if cfg["route_mode"] not in ("egress", "tunnel", "georouting"):
                 cfg["route_mode"] = "egress"
             route_mode_warning = ""
             if cfg.get("route_mode") == "tunnel" and not self._tunnel_iface_up():
@@ -1365,9 +1482,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 cfg["ingress_gw"],
             )
             try:
+                self._store_geo_config(cfg.get("geo", {}))
                 self._store_iface_config(cfg)
                 self._write_iface_env(cfg)
                 self._apply_iface_routing()
+                # Немедленный прогон geo-ip только по кнопке «Применить» в georouting (app.js).
+                self._apply_geo_ip_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
             except Exception as e:
                 return self._send_text(500, f"apply failed: {e}")
             runtime = self._routing_runtime_status(cfg)
@@ -1383,7 +1503,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 )
             resp = {
                 "ok": True,
-                "config": self._load_iface_config(),
+                "config": (lambda x: (dict(x) | {"geo": self._load_geo_config()}) if isinstance(x, dict) else {})(
+                    self._load_iface_config()
+                ),
                 "runtime": runtime,
                 "config_dir": self._webui_cfg_dir(),
             }
@@ -1396,8 +1518,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
             mode = str(body.get("route_mode", "")).strip().lower()
-            if mode not in ("egress", "tunnel"):
-                return self._send_text(400, "route_mode must be egress|tunnel")
+            if mode not in ("egress", "tunnel", "georouting"):
+                return self._send_text(400, "route_mode must be egress|tunnel|georouting")
             if mode == "tunnel" and not self._tunnel_iface_up():
                 return self._send_text(409, "awg-uplink tunnel is not UP")
             cfg = self._load_iface_config()
@@ -1405,10 +1527,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 return self._send_text(400, "interface config is empty")
             cfg["route_mode"] = mode
             cfg["updated_at"] = int(time.time())
+            cfg["geo"] = self._load_geo_config()
             try:
                 self._store_iface_config(cfg)
                 self._write_iface_env(cfg)
                 self._apply_iface_routing()
+                self._apply_geo_ip_runtime(cfg)
             except Exception as e:
                 return self._send_text(500, f"apply failed: {e}")
             runtime = self._routing_runtime_status(cfg)

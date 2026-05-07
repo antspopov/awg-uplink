@@ -167,9 +167,9 @@ done
 [[ -f "$SYSTEMD_SRC/$IFACE_SERVICE" ]] || die "missing $SYSTEMD_SRC/$IFACE_SERVICE"
 
 if command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io)..."
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables >/dev/null
 fi
 
 ensure_amneziawg
@@ -185,14 +185,20 @@ cp -a "$WEBUI_SRC/." "$APP_DIR/"
 
 log "Installing runtime source files..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" "$APP_ROOT/lib/awg-webui-iface-routing-apply.sh"
+install -m 755 "$LIB_SRC/awg-uplink-geo-ip-refresh.py" "$APP_ROOT/lib/awg-uplink-geo-ip-refresh.py"
 install -m 644 "$SYSTEMD_SRC/$IFACE_SERVICE" "$APP_ROOT/systemd/$IFACE_SERVICE"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.service" "$APP_ROOT/systemd/awg-uplink-geo-ip-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.timer" "$APP_ROOT/systemd/awg-uplink-geo-ip-refresh.timer"
 
 log "Installing routing apply script..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" /usr/local/sbin/awg-webui-iface-routing-apply.sh
+install -m 755 "$LIB_SRC/awg-uplink-geo-ip-refresh.py" /usr/local/sbin/awg-uplink-geo-ip-refresh.py
 
 log "Installing systemd units..."
 install -m 644 "$SYSTEMD_SRC/$WEBUI_SERVICE" "/etc/systemd/system/$WEBUI_SERVICE"
 install -m 644 "$SYSTEMD_SRC/$IFACE_SERVICE" "/etc/systemd/system/$IFACE_SERVICE"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.service" "/etc/systemd/system/awg-uplink-geo-ip-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.timer" "/etc/systemd/system/awg-uplink-geo-ip-refresh.timer"
 
 if [[ ! -f "$CFG_DIR/webui.env" ]]; then
   log "Creating default $CFG_DIR/webui.env"
@@ -206,6 +212,42 @@ AWG_UI_PASS=change-me
 AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
 EOF
   chmod 600 "$CFG_DIR/webui.env"
+fi
+
+if [[ ! -f "$CFG_DIR/georouting.json" ]]; then
+  log "Creating default $CFG_DIR/georouting.json"
+  cat >"$CFG_DIR/georouting.json" <<'EOF'
+{
+  "target": "tunnel",
+  "ipMode": false,
+  "domainMode": false,
+  "readyLinks": {
+    "ip": [
+      {
+        "url": "https://antifilter.download/list/allyouneed.lst",
+        "status": "ожидает проверки",
+        "enabled": true,
+        "protected": true
+      }
+    ],
+    "domain": [
+      {
+        "url": "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst",
+        "status": "ожидает проверки",
+        "enabled": true,
+        "protected": true
+      }
+    ]
+  },
+  "lists": {
+    "ipInclude": "",
+    "ipExclude": "",
+    "domainInclude": "",
+    "domainExclude": ""
+  }
+}
+EOF
+  chmod 600 "$CFG_DIR/georouting.json"
 fi
 
 # Backward-compatible defaults for existing configs.
