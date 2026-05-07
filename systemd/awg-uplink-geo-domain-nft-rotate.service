@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily geo domain nft set rotate (backup snapshot, flush primary)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+ExecStart=/usr/local/sbin/awg-uplink-geo-domain-refresh.py --rotate-nft

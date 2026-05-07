@@ -634,6 +634,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         geo = cfg.get("geo", {}) if isinstance(cfg.get("geo", {}), dict) else self._load_geo_config()
         return bool(geo.get("ipMode", False))
 
+    def _is_geo_domain_enabled(self, cfg: dict) -> bool:
+        if str(cfg.get("route_mode", "egress")).strip().lower() != "georouting":
+            return False
+        geo = cfg.get("geo", {}) if isinstance(cfg.get("geo", {}), dict) else self._load_geo_config()
+        return bool(geo.get("domainMode", False))
+
     def _install_iface_runtime(self):
         repo_root = self._repo_root()
         candidates = [
@@ -667,6 +673,26 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         os.chmod(geo_ip_script_dst, 0o755)
         shutil.copyfile(geo_ip_service_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.service")
         shutil.copyfile(geo_ip_timer_src, "/etc/systemd/system/awg-uplink-geo-ip-refresh.timer")
+        geo_domain_script_src = str(repo_root / "lib" / "awg-uplink-geo-domain-refresh.py")
+        geo_domain_script_dst = "/usr/local/sbin/awg-uplink-geo-domain-refresh.py"
+        geo_domain_service_src = str(repo_root / "systemd" / "awg-uplink-geo-domain-refresh.service")
+        geo_domain_timer_src = str(repo_root / "systemd" / "awg-uplink-geo-domain-refresh.timer")
+        geo_domain_rotate_svc = str(repo_root / "systemd" / "awg-uplink-geo-domain-nft-rotate.service")
+        geo_domain_rotate_tmr = str(repo_root / "systemd" / "awg-uplink-geo-domain-nft-rotate.timer")
+        if (
+            not Path(geo_domain_script_src).exists()
+            or not Path(geo_domain_service_src).exists()
+            or not Path(geo_domain_timer_src).exists()
+            or not Path(geo_domain_rotate_svc).exists()
+            or not Path(geo_domain_rotate_tmr).exists()
+        ):
+            raise RuntimeError("geo-domain runtime files are missing (lib/systemd)")
+        shutil.copyfile(geo_domain_script_src, geo_domain_script_dst)
+        os.chmod(geo_domain_script_dst, 0o755)
+        shutil.copyfile(geo_domain_service_src, "/etc/systemd/system/awg-uplink-geo-domain-refresh.service")
+        shutil.copyfile(geo_domain_timer_src, "/etc/systemd/system/awg-uplink-geo-domain-refresh.timer")
+        shutil.copyfile(geo_domain_rotate_svc, "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.service")
+        shutil.copyfile(geo_domain_rotate_tmr, "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.timer")
 
     def _apply_iface_routing(self):
         self._install_iface_runtime()
@@ -690,6 +716,23 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             _run(["systemctl", "stop", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
             _run(["systemctl", "disable", "awg-uplink-geo-ip-refresh.timer"], timeout=3.0)
             _run(["systemctl", "start", "awg-uplink-geo-ip-refresh.service"], timeout=5.0)
+
+    def _apply_geo_domain_runtime(self, cfg: dict, *, run_refresh_now: bool = True):
+        enabled = self._is_geo_domain_enabled(cfg)
+        _run(["systemctl", "daemon-reload"], timeout=3.0)
+        if enabled:
+            _run(["systemctl", "enable", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "enable", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
+            if run_refresh_now:
+                _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.service"], timeout=5.0)
+            _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "start", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
+        else:
+            _run(["systemctl", "stop", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "disable", "awg-uplink-geo-domain-refresh.timer"], timeout=3.0)
+            _run(["systemctl", "stop", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
+            _run(["systemctl", "disable", "awg-uplink-geo-domain-nft-rotate.timer"], timeout=3.0)
+            _run(["systemctl", "start", "awg-uplink-geo-domain-refresh.service"], timeout=5.0)
 
     def _routing_runtime_status(self, cfg: dict) -> dict:
         egress_dev = str(cfg.get("egress_dev", "")).strip()
@@ -746,6 +789,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "service": svc,
             "default_route": default_line,
             "geo_ip_enabled": self._is_geo_ip_enabled(cfg),
+            "geo_domain_enabled": self._is_geo_domain_enabled(cfg),
         }
 
     def _validate_iface_cfg(self, cfg: dict) -> tuple[bool, str]:
@@ -1488,6 +1532,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 self._apply_iface_routing()
                 # Немедленный прогон geo-ip только по кнопке «Применить» в georouting (app.js).
                 self._apply_geo_ip_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
+                self._apply_geo_domain_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
             except Exception as e:
                 return self._send_text(500, f"apply failed: {e}")
             runtime = self._routing_runtime_status(cfg)
@@ -1533,6 +1578,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 self._write_iface_env(cfg)
                 self._apply_iface_routing()
                 self._apply_geo_ip_runtime(cfg)
+                self._apply_geo_domain_runtime(cfg)
             except Exception as e:
                 return self._send_text(500, f"apply failed: {e}")
             runtime = self._routing_runtime_status(cfg)

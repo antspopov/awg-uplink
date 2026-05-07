@@ -353,6 +353,10 @@ body::before {
   margin-top: 14px;
 }
 
+.geo-routing-settings-card {
+  margin-top: 18px;
+}
+
 .card-head {
   display: flex;
   align-items: center;

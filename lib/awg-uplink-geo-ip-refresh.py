@@ -78,6 +78,21 @@ def normalize_cidrs(text: str) -> list[str]:
     return out
 
 
+def _maybe_flush_geo_policy_routing_tables() -> None:
+    """Таблицы 207/208 общие для ip/domain — не flush пока включён хотя бы один режим."""
+    iface = load_json(CIF_JSON)
+    geo = load_json(GEO_JSON)
+    route_mode = str(iface.get("route_mode", "egress")).strip().lower()
+    if route_mode != "georouting":
+        run(["ip", "-4", "route", "flush", "table", TABLE_GEO_TUN], check=False)
+        run(["ip", "-4", "route", "flush", "table", TABLE_GEO_EGRESS], check=False)
+        return
+    if bool(geo.get("ipMode", False)) or bool(geo.get("domainMode", False)):
+        return
+    run(["ip", "-4", "route", "flush", "table", TABLE_GEO_TUN], check=False)
+    run(["ip", "-4", "route", "flush", "table", TABLE_GEO_EGRESS], check=False)
+
+
 def cleanup():
     for dec in (MARK_FWD_DEC, MARK_LOCAL_DEC):
         run(["ip", "rule", "del", "fwmark", dec, "priority", RULE_PRIO], check=False)
@@ -89,8 +104,7 @@ def cleanup():
                 break
     run(["nft", "delete", "table", "ip", NFT_TABLE], check=False)
     run(["nft", "delete", "table", "ip", NFT_NAT_TABLE], check=False)
-    run(["ip", "-4", "route", "flush", "table", TABLE_GEO_TUN], check=False)
-    run(["ip", "-4", "route", "flush", "table", TABLE_GEO_EGRESS], check=False)
+    _maybe_flush_geo_policy_routing_tables()
 
 
 def _nft_escape_iface(name: str) -> str:

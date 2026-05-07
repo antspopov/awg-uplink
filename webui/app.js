@@ -975,6 +975,8 @@ function initRoutingPanel(state) {
     geoFieldset.disabled = !geoSelected;
     if (!geoSelected) {
       setStatusById("geoRoutingStatus", "dot--unknown", "выберите режим georouting");
+    } else if (!state.geo.ipMode && !state.geo.domainMode) {
+      setStatusById("geoRoutingStatus", "dot--warn", "Требуется включить хотя бы один режим");
     } else if (state.persistedRouteMode !== "georouting") {
       setStatusById("geoRoutingStatus", "dot--warn", "не применено");
     } else if (geoSettingsFingerprint(state.geo) !== state.savedGeoFingerprint) {

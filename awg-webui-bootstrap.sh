@@ -163,8 +163,16 @@ done
 [[ ${EUID:-0} -eq 0 ]] || die "run as root: sudo $0"
 [[ -d "$WEBUI_SRC" ]] || die "missing $WEBUI_SRC"
 [[ -f "$LIB_SRC/awg-webui-iface-routing-apply.sh" ]] || die "missing iface script in lib/"
+[[ -f "$LIB_SRC/awg-uplink-geo-ip-refresh.py" ]] || die "missing geo ip refresh script in lib/"
+[[ -f "$LIB_SRC/awg-uplink-geo-domain-refresh.py" ]] || die "missing geo domain refresh script in lib/"
 [[ -f "$SYSTEMD_SRC/$WEBUI_SERVICE" ]] || die "missing $SYSTEMD_SRC/$WEBUI_SERVICE"
 [[ -f "$SYSTEMD_SRC/$IFACE_SERVICE" ]] || die "missing $SYSTEMD_SRC/$IFACE_SERVICE"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.service" ]] || die "missing geo ip refresh unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.timer" ]] || die "missing geo ip refresh timer in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.service" ]] || die "missing geo domain refresh unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" ]] || die "missing geo domain refresh timer in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" ]] || die "missing geo domain nft-rotate unit in systemd/"
+[[ -f "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" ]] || die "missing geo domain nft-rotate timer in systemd/"
 
 if command -v apt-get >/dev/null 2>&1; then
   log "Installing dependencies (python3, iproute2, netplan.io, nftables)..."
@@ -186,19 +194,29 @@ cp -a "$WEBUI_SRC/." "$APP_DIR/"
 log "Installing runtime source files..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" "$APP_ROOT/lib/awg-webui-iface-routing-apply.sh"
 install -m 755 "$LIB_SRC/awg-uplink-geo-ip-refresh.py" "$APP_ROOT/lib/awg-uplink-geo-ip-refresh.py"
+install -m 755 "$LIB_SRC/awg-uplink-geo-domain-refresh.py" "$APP_ROOT/lib/awg-uplink-geo-domain-refresh.py"
 install -m 644 "$SYSTEMD_SRC/$IFACE_SERVICE" "$APP_ROOT/systemd/$IFACE_SERVICE"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.service" "$APP_ROOT/systemd/awg-uplink-geo-ip-refresh.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.timer" "$APP_ROOT/systemd/awg-uplink-geo-ip-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.service" "$APP_ROOT/systemd/awg-uplink-geo-domain-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" "$APP_ROOT/systemd/awg-uplink-geo-domain-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" "$APP_ROOT/systemd/awg-uplink-geo-domain-nft-rotate.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" "$APP_ROOT/systemd/awg-uplink-geo-domain-nft-rotate.timer"
 
 log "Installing routing apply script..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" /usr/local/sbin/awg-webui-iface-routing-apply.sh
 install -m 755 "$LIB_SRC/awg-uplink-geo-ip-refresh.py" /usr/local/sbin/awg-uplink-geo-ip-refresh.py
+install -m 755 "$LIB_SRC/awg-uplink-geo-domain-refresh.py" /usr/local/sbin/awg-uplink-geo-domain-refresh.py
 
 log "Installing systemd units..."
 install -m 644 "$SYSTEMD_SRC/$WEBUI_SERVICE" "/etc/systemd/system/$WEBUI_SERVICE"
 install -m 644 "$SYSTEMD_SRC/$IFACE_SERVICE" "/etc/systemd/system/$IFACE_SERVICE"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.service" "/etc/systemd/system/awg-uplink-geo-ip-refresh.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-ip-refresh.timer" "/etc/systemd/system/awg-uplink-geo-ip-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.service" "/etc/systemd/system/awg-uplink-geo-domain-refresh.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-refresh.timer" "/etc/systemd/system/awg-uplink-geo-domain-refresh.timer"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.service" "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.service"
+install -m 644 "$SYSTEMD_SRC/awg-uplink-geo-domain-nft-rotate.timer" "/etc/systemd/system/awg-uplink-geo-domain-nft-rotate.timer"
 
 if [[ ! -f "$CFG_DIR/webui.env" ]]; then
   log "Creating default $CFG_DIR/webui.env"

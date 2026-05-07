@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic refresh of geo domain lists
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+Unit=awg-uplink-geo-domain-refresh.service
+
+[Install]
+WantedBy=timers.target
