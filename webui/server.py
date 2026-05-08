@@ -531,6 +531,26 @@ def _upsert_mtproto_censorship_cfg(cfg_text: str, domain: str, mask_port: int) -
     return text[:start] + section + text[end:]
 
 
+_AMNEZIA_STACK_CACHE_LOCK = threading.Lock()
+_AMNEZIA_STACK_CACHE_MONO = 0.0
+_AMNEZIA_STACK_CACHE_VAL = False
+_AMNEZIA_STACK_CACHE_TTL = 55.0
+
+
+def _amnezia_stack_probe_cached(probe_fn) -> bool:
+    """TTL cache for Docker-based Amnezia probes (metrics are polled frequently)."""
+    global _AMNEZIA_STACK_CACHE_MONO, _AMNEZIA_STACK_CACHE_VAL
+    now = time.monotonic()
+    with _AMNEZIA_STACK_CACHE_LOCK:
+        if now - _AMNEZIA_STACK_CACHE_MONO < _AMNEZIA_STACK_CACHE_TTL:
+            return _AMNEZIA_STACK_CACHE_VAL
+    v = bool(probe_fn())
+    with _AMNEZIA_STACK_CACHE_LOCK:
+        _AMNEZIA_STACK_CACHE_MONO = now
+        _AMNEZIA_STACK_CACHE_VAL = v
+    return v
+
+
 class WebUIHandler(SimpleHTTPRequestHandler):
     server_version = "awg-uplink-webui/0.2"
 
@@ -781,6 +801,47 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return False
         rc, out, _ = _run(["docker", "inspect", "-f", "{{.State.Running}}", n], timeout=6.0)
         return rc == 0 and (out or "").strip().lower() == "true"
+
+    def _docker_daemon_ok(self) -> bool:
+        if not shutil.which("docker"):
+            return False
+        rc, _, _ = _run(["docker", "info"], timeout=5.0)
+        return rc == 0
+
+    def _compute_amnezia_vpn_stack_present(self) -> bool:
+        """Docker daemon up and host shows a typical Amnezia VPN Docker setup."""
+        if not shutil.which("docker"):
+            return False
+        if not self._docker_daemon_ok():
+            return False
+
+        # Bridge can be amn0, amn1, ... depending on host/container lifecycle.
+        try:
+            for p in Path("/sys/class/net").glob("amn*"):
+                if not p.name.startswith("amn"):
+                    continue
+                tail = p.name[3:]
+                if tail and not tail.isdigit():
+                    continue
+                if (p / "bridge").is_dir():
+                    return True
+        except OSError:
+            pass
+
+        # Required container name rule: amnezia-awg[digits]
+        rc, out, _ = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=8.0)
+        if rc != 0:
+            return False
+        for ln in (out or "").splitlines():
+            name = ln.strip().lower()
+            if not name:
+                continue
+            if re.fullmatch(r"amnezia-awg\d*", name):
+                return True
+        return False
+
+    def _amnezia_vpn_stack_present(self) -> bool:
+        return _amnezia_stack_probe_cached(self._compute_amnezia_vpn_stack_present)
 
     def _iface_with_geo(self, iface: dict | None) -> dict:
         merged = dict(iface or {})
@@ -1547,6 +1608,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         uptime_raw = _read_text("/proc/uptime", "").strip().split()
         uptime_sec = int(float(uptime_raw[0])) if len(uptime_raw) > 0 else 0
 
+        stack = self._amnezia_vpn_stack_present()
         return self._send_json(
             200,
             {
@@ -1562,6 +1624,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "load5": load5,
                 "load15": load15,
                 "uptime_sec": uptime_sec,
+                # Web UI: баннер установки Amnezia, если нет Docker/демона или нет типичного стека контейнеров Amnezia
+                "amnezia_setup_banner": not stack,
             },
         )
 

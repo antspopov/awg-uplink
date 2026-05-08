@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>awg-uplink — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260508-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260508-2" />
   </head>
   <body>
     <div class="app">
@@ -16,6 +16,15 @@
             <div class="title">awg-uplink</div>
             <div class="subtitle">Веб‑интерфейс управления</div>
           </div>
+        </div>
+        <div id="amneziaSetupNotice" class="topbar-notice hidden" role="status" aria-live="polite">
+          <span class="topbar-notice__marker" aria-hidden="true"></span>
+          <span class="topbar-notice__text topbar-notice__text--blink">
+            Для полноценной работы сервиса установите на сервер <strong>AmneziaVPN</strong>.
+          </span>
+          <button class="btn btn--sm btn--ghost" type="button" id="amneziaSetupDetailsBtn">
+            Подробнее
+          </button>
         </div>
         <div class="topbar-right">
           <button class="btn" type="button" id="logoutBtn">Выйти</button>
@@ -545,6 +554,43 @@
       </footer>
     </div>
 
+    <div class="modal-overlay hidden" id="amneziaSetupModalOverlay" aria-hidden="true">
+      <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-labelledby="amneziaSetupModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="amneziaSetupModalTitle">Установка AmneziaVPN на сервер</div>
+          <button class="icon-btn" id="amneziaSetupModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body modal-body--prose">
+          <p>
+            Серверные компоненты <strong>AmneziaVPN</strong> нужно ставить через <strong>мобильное приложение AmneziaVPN</strong>:
+            добавьте этот сервер в приложении (SSH-доступ) и выполните шаги мастера установки на машину.
+          </p>
+          <p class="modal-body__label">Приложение на телефон</p>
+          <div class="store-links">
+            <a
+              class="store-link store-link--play"
+              href="https://play.google.com/store/apps/details?id=org.amnezia.vpn"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Google Play (Android)</a>
+            <a
+              class="store-link store-link--apple"
+              href="https://apps.apple.com/app/amneziavpn/id1600529900"
+              target="_blank"
+              rel="noopener noreferrer"
+              >App&nbsp;Store (iPhone / iPad)</a>
+          </div>
+          <p class="muted">
+            Установить <strong>AmneziaDNS</strong> рекомендуется: на DNS-панели он используется для доменной маршрутизации и
+            автоматической настройки DNS-watch (без него часть DNS/geo-функций будет ограничена).
+          </p>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="amneziaSetupModalOkBtn" type="button">Понятно</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-overlay hidden" id="importModalOverlay" aria-hidden="true">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
         <div class="modal-head">
@@ -711,7 +757,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260508-5"></script>
+    <script src="./app.js?v=20260508-7"></script>
   </body>
 </html>
 

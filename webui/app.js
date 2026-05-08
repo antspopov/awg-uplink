@@ -276,6 +276,30 @@ function closeModal() {
   ov.setAttribute("aria-hidden", "true");
 }
 
+function initAmneziaSetupBanner() {
+  const overlay = $("amneziaSetupModalOverlay");
+  function openAmneziaSetupModal() {
+    overlay.classList.remove("hidden");
+    overlay.setAttribute("aria-hidden", "false");
+    $("amneziaSetupModalOkBtn").focus();
+  }
+  function closeAmneziaSetupModal() {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  $("amneziaSetupDetailsBtn").addEventListener("click", openAmneziaSetupModal);
+  $("amneziaSetupModalCloseBtn").addEventListener("click", closeAmneziaSetupModal);
+  $("amneziaSetupModalOkBtn").addEventListener("click", closeAmneziaSetupModal);
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target && ev.target.id === "amneziaSetupModalOverlay") closeAmneziaSetupModal();
+  });
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (overlay.classList.contains("hidden")) return;
+    closeAmneziaSetupModal();
+  });
+}
+
 function initImportModal(state) {
   const help = $("confHelp");
   const applyBtn = $("importApplyBtn");
@@ -470,6 +494,9 @@ async function refreshSystemMetrics(state) {
     $("mUptime").textContent = fmtUptime(m.uptime_sec || 0);
     const d = new Date();
     $("mUpdatedAt").textContent = `обновление: ${d.toLocaleTimeString()}`;
+
+    const notice = $("amneziaSetupNotice");
+    notice.classList.toggle("hidden", m.amnezia_setup_banner !== true);
   } catch {
     // keep last values on temporary errors
   }
@@ -2036,6 +2063,7 @@ async function main() {
   }
 
   initImportModal(state);
+  initAmneziaSetupBanner();
   initMtprotoPanel(state);
   initDnsPanel();
   initInterfaceSave();
