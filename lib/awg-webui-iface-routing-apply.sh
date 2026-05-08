@@ -207,8 +207,17 @@ detect_dport_docker() {
   return 1
 }
 
+# Published-UDP nft mark нужен только при реальном Docker/Amnezия-мосту (или форс-порте).
+docker_pubudp_tunnel_applicable() {
+  local br=${1:-}
+  [[ -n "${DOCKER_FORCE_PORT:-}" ]] && return 0
+  [[ -n "$br" ]] && ip link show "$br" &>/dev/null && return 0
+  return 1
+}
+
 wait_for_docker_udp_port() {
   local br=$1 max=${DOCKER_BOOT_WAIT_SEC:-120} step=${DOCKER_BOOT_POLL_SEC:-2} e=0 d
+  [[ -n "$br" ]] && ip link show "$br" &>/dev/null || return 1
   while [[ $e -lt $max ]]; do
     d=$(detect_dport_nat "$br" || true)
     [[ -n $d ]] && {
@@ -558,16 +567,9 @@ apply_cfg() {
         fi
       done
     fi
-    # Default for whole system -> tunnel.
-    while ip -4 route del default dev awg-uplink 2>/dev/null; do true; done
-    if [[ -n "$awg_src" ]]; then
-      ip -4 route replace default dev awg-uplink src "$awg_src"
-    else
-      ip -4 route replace default dev awg-uplink
-    fi
     rp_filter_tunnel_prepare
 
-    # Keep replies from public egress/ingress IPs through physical uplinks.
+    # Сначала policy для публичного egress — иначе при default→awg-uplink ответы SSH/HTTP уйдут в туннель.
     if [[ -n "${EGRESS_GW:-}" ]]; then
       ip -4 route replace default via "$EGRESS_GW" dev "$EGRESS_DEV" src "$EGRESS_IP" table "$EGRESS_TABLE"
     else
@@ -576,6 +578,14 @@ apply_cfg() {
     [[ -n $elink ]] && ip -4 route replace "$elink" dev "$EGRESS_DEV" table "$EGRESS_TABLE"
     ip -4 rule add from "$EGRESS_IP/32" table "$EGRESS_TABLE" priority "$EGRESS_RULE_PRIO"
     BYPASS_SRCS="$EGRESS_IP"
+
+    # Default for whole system -> tunnel (after from-EGRESS rule is in place).
+    while ip -4 route del default dev awg-uplink 2>/dev/null; do true; done
+    if [[ -n "$awg_src" ]]; then
+      ip -4 route replace default dev awg-uplink src "$awg_src"
+    else
+      ip -4 route replace default dev awg-uplink
+    fi
 
     # Keep non-selected inbound interfaces routed to tunnel table explicitly.
     if [[ -n "$awg_src" ]]; then
@@ -591,21 +601,25 @@ apply_cfg() {
     DOCKER_MARK_BR="${DOCKER_MARK_IN:-}"
     [[ -z "${DOCKER_MARK_BR:-}" ]] && DOCKER_MARK_BR="$(detect_docker_br_iface)"
     DOCKER_MARK_DPORT=""
-    if [[ -n "${DOCKER_FORCE_PORT:-}" ]]; then
-      DOCKER_MARK_DPORT="${DOCKER_FORCE_PORT}"
-    else
-      DOCKER_MARK_DPORT="$(wait_for_docker_udp_port "$DOCKER_MARK_BR" || true)"
-    fi
-    if [[ -n "$DOCKER_MARK_DPORT" ]]; then
-      if nft_pubudp_setup "$DOCKER_MARK_BR" "$DOCKER_MARK_DPORT" "$DOCKER_FWMARK_HEX"; then
-        setup_docker_udp_fwmark_tunnel "$EGRESS_TABLE" "$DOCKER_FWMARK_DEC" "$DOCKER_MARK_TUNNEL_PRIO"
-        DOCKER_TUNNEL_MARK_DEC="$DOCKER_FWMARK_DEC"
-        DOCKER_TUNNEL_MARK_PRIO="$DOCKER_MARK_TUNNEL_PRIO"
-        DOCKER_TUNNEL_NFT_ACTIVE=1
-        log "docker-udp nft mark + fwmark prio ${DOCKER_MARK_TUNNEL_PRIO} (${DOCKER_MARK_BR}, sport=${DOCKER_MARK_DPORT})"
+    if docker_pubudp_tunnel_applicable "$DOCKER_MARK_BR"; then
+      if [[ -n "${DOCKER_FORCE_PORT:-}" ]]; then
+        DOCKER_MARK_DPORT="${DOCKER_FORCE_PORT}"
+      else
+        DOCKER_MARK_DPORT="$(wait_for_docker_udp_port "$DOCKER_MARK_BR" || true)"
+      fi
+      if [[ -n "$DOCKER_MARK_DPORT" ]]; then
+        if nft_pubudp_setup "$DOCKER_MARK_BR" "$DOCKER_MARK_DPORT" "$DOCKER_FWMARK_HEX"; then
+          setup_docker_udp_fwmark_tunnel "$EGRESS_TABLE" "$DOCKER_FWMARK_DEC" "$DOCKER_MARK_TUNNEL_PRIO"
+          DOCKER_TUNNEL_MARK_DEC="$DOCKER_FWMARK_DEC"
+          DOCKER_TUNNEL_MARK_PRIO="$DOCKER_MARK_TUNNEL_PRIO"
+          DOCKER_TUNNEL_NFT_ACTIVE=1
+          log "docker-udp nft mark + fwmark prio ${DOCKER_MARK_TUNNEL_PRIO} (${DOCKER_MARK_BR}, sport=${DOCKER_MARK_DPORT})"
+        fi
+      else
+        log "tunnel: could not detect published Docker UDP port (set DOCKER_FORCE_PORT in interfaces.env)"
       fi
     else
-      log "tunnel: could not detect published Docker UDP port (set DOCKER_FORCE_PORT in interfaces.env)"
+      log "tunnel: skip docker-udp mark (bridge ${DOCKER_MARK_BR:-unset} absent; omit wait — not a Docker/Amnezia host)"
     fi
     # Forwarded traffic uses private src before SNAT → must not hit catch-all tunnel rule (prio 90).
     DOCKER_POLICY_RULE_TABLE="$TUN_TABLE"
