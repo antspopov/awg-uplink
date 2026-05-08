@@ -601,7 +601,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return hmac.compare_digest(expected, response)
 
     def _default_iface_firewall(self) -> dict:
-        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 443, 8080]}
+        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443]}
 
     def _iface_firewall_for_response(self, cfg: dict) -> dict:
         base = self._default_iface_firewall()

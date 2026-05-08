@@ -17,8 +17,296 @@ AMNEZIAWG_SRC_CACHE=${AMNEZIAWG_SRC_CACHE:-/var/cache/awg-uplink-amneziawg}
 AMNEZIAWG_KERNEL_REPO=${AMNEZIAWG_KERNEL_REPO:-https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git}
 AMNEZIAWG_TOOLS_REPO=${AMNEZIAWG_TOOLS_REPO:-https://github.com/amnezia-vpn/amneziawg-tools.git}
 
-log() { echo "[awg-webui-bootstrap] $*"; }
-die() { echo "[awg-webui-bootstrap] ERROR: $*" >&2; exit 1; }
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_BLUE=""
+  C_CYAN=""
+fi
+
+log() { echo "${C_BLUE}[awg-webui-bootstrap]${C_RESET} $*"; }
+die() { echo "${C_RED}[awg-webui-bootstrap] ERROR:${C_RESET} $*" >&2; exit 1; }
+
+WEBUI_DOMAIN=""
+WEBUI_USER="admin"
+WEBUI_PASS=""
+USE_LETSENCRYPT=0
+SELF_SIGNED_CERT_DIR="/etc/ssl/awg-uplink-webui"
+NGINX_SITE_PATH="/etc/nginx/sites-available/awg-uplink-webui.conf"
+NGINX_SITE_LINK="/etc/nginx/sites-enabled/awg-uplink-webui.conf"
+EXISTING_LE_DOMAIN=""
+LE_RENEW_SELECTED=1
+
+generate_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
+    return
+  fi
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+}
+
+set_env_key() {
+  local file=$1 key=$2 value=$3 tmp
+  tmp="${file}.tmp.$$"
+  awk -F= -v k="$key" -v v="$value" '
+    BEGIN { updated=0 }
+    $0 ~ "^[[:space:]]*" k "=" {
+      print k "=" v
+      updated=1
+      next
+    }
+    { print }
+    END {
+      if (!updated) print k "=" v
+    }
+  ' "$file" >"$tmp"
+  mv -f -- "$tmp" "$file"
+}
+
+collect_interface_urls() {
+  local urls=()
+  while IFS=' ' read -r iface ip; do
+    [[ -n "$iface" && -n "$ip" ]] || continue
+    [[ "$iface" == lo* ]] && continue
+    [[ "$iface" == docker* ]] && continue
+    [[ "$iface" == amn* ]] && continue
+    [[ "$iface" == awg* ]] && continue
+    [[ "$iface" == veth* ]] && continue
+    urls+=("https://$ip")
+  done < <(ip -o -4 addr show scope global | awk '{split($4,a,"/"); print $2, a[1]}')
+  if [[ ${#urls[@]} -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s\n' "${urls[@]}" | sort -u
+}
+
+prompt_install_profile() {
+  local choice
+  cat <<'EOF'
+
+Выберите профиль HTTPS для Web UI:
+  1) Свой домен + Let's Encrypt (рекомендуется)
+  2) Публичный домен + самоподписанный сертификат
+
+ПРЕДУПРЕЖДЕНИЕ:
+  - При самоподписанном сертификате браузер покажет предупреждение безопасности.
+  - Для Let's Encrypt домен должен указывать на этот сервер и порты 80/443 должны быть доступны извне.
+EOF
+  while true; do
+    read -r -p "Введите 1 или 2 [1]: " choice
+    choice=${choice:-1}
+    case "$choice" in
+      1) USE_LETSENCRYPT=1; return 0 ;;
+      2) USE_LETSENCRYPT=0; return 0 ;;
+      *) echo "Неверный выбор. Введите 1 или 2." ;;
+    esac
+  done
+}
+
+prompt_webui_settings() {
+  local prompt_domain prompt_user prompt_pass default_domain reuse_choice
+  if [[ $USE_LETSENCRYPT -eq 1 ]]; then
+    EXISTING_LE_DOMAIN=$(detect_existing_letsencrypt_domain)
+    default_domain=${EXISTING_LE_DOMAIN:-}
+    prompt_domain="Введите ваш домен для Let's Encrypt"
+    if [[ -n "$default_domain" ]]; then
+      prompt_domain+=" [$default_domain]"
+    fi
+    prompt_domain+=": "
+  else
+    default_domain="wb.ru"
+    prompt_domain="Введите домен для HTTPS (self-signed) [wb.ru]: "
+  fi
+
+  while true; do
+    read -r -p "$prompt_domain" WEBUI_DOMAIN
+    WEBUI_DOMAIN=${WEBUI_DOMAIN// /}
+    if [[ -z "$WEBUI_DOMAIN" && -n "$default_domain" ]]; then
+      WEBUI_DOMAIN="$default_domain"
+    fi
+    [[ -n "$WEBUI_DOMAIN" ]] && break
+    echo "Домен не может быть пустым."
+  done
+
+  if [[ $USE_LETSENCRYPT -eq 1 && -n "$EXISTING_LE_DOMAIN" && "$WEBUI_DOMAIN" == "$EXISTING_LE_DOMAIN" ]]; then
+    while true; do
+      read -r -p "Найден существующий сертификат для $EXISTING_LE_DOMAIN. Обновить/перевыпустить сейчас? [y/N]: " reuse_choice
+      reuse_choice=${reuse_choice:-N}
+      case "${reuse_choice,,}" in
+        y|yes) LE_RENEW_SELECTED=1; break ;;
+        n|no) LE_RENEW_SELECTED=0; break ;;
+        *) echo "Введите y или n." ;;
+      esac
+    done
+  fi
+
+  read -r -p "Логин для Web UI [admin]: " prompt_user
+  WEBUI_USER=${prompt_user:-admin}
+
+  read -r -s -p "Пароль для Web UI (Enter = сгенерировать): " prompt_pass
+  echo
+  if [[ -n "$prompt_pass" ]]; then
+    WEBUI_PASS="$prompt_pass"
+  else
+    WEBUI_PASS=$(generate_password)
+    echo "Сгенерирован пароль: $WEBUI_PASS"
+  fi
+}
+
+detect_existing_letsencrypt_domain() {
+  local cert_dir domain
+  cert_dir="/etc/letsencrypt/live"
+  [[ -d "$cert_dir" ]] || return 0
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    [[ "$domain" == "README" ]] && continue
+    if [[ -f "$cert_dir/$domain/fullchain.pem" && -f "$cert_dir/$domain/privkey.pem" ]]; then
+      echo "$domain"
+      return 0
+    fi
+  done < <(ls -1 "$cert_dir" 2>/dev/null || true)
+}
+
+write_nginx_config() {
+  local cert_path=$1
+  local key_path=$2
+  install -d -m 755 /var/www/certbot
+  cat >"$NGINX_SITE_PATH" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $WEBUI_DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name $WEBUI_DOMAIN;
+
+    ssl_certificate $cert_path;
+    ssl_certificate_key $key_path;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+  ln -sf "$NGINX_SITE_PATH" "$NGINX_SITE_LINK"
+  rm -f /etc/nginx/sites-enabled/default
+}
+
+setup_self_signed_cert() {
+  local cert_path="$SELF_SIGNED_CERT_DIR/fullchain.pem"
+  local key_path="$SELF_SIGNED_CERT_DIR/privkey.pem"
+  install -d -m 700 "$SELF_SIGNED_CERT_DIR"
+  log "Generating self-signed certificate for $WEBUI_DOMAIN..."
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "$key_path" \
+    -out "$cert_path" \
+    -days 825 \
+    -subj "/CN=$WEBUI_DOMAIN" >/dev/null 2>&1
+  chmod 600 "$key_path"
+  chmod 644 "$cert_path"
+  write_nginx_config "$cert_path" "$key_path"
+}
+
+setup_letsencrypt_cert() {
+  local cert_path="/etc/letsencrypt/live/$WEBUI_DOMAIN/fullchain.pem"
+  local key_path="/etc/letsencrypt/live/$WEBUI_DOMAIN/privkey.pem"
+  install -d -m 755 /var/www/certbot
+
+  cat >"$NGINX_SITE_PATH" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $WEBUI_DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 200 "ACME challenge endpoint ready\n";
+        add_header Content-Type text/plain;
+    }
+}
+EOF
+  ln -sf "$NGINX_SITE_PATH" "$NGINX_SITE_LINK"
+  rm -f /etc/nginx/sites-enabled/default
+
+  nginx -t >/dev/null
+  systemctl restart nginx
+
+  if [[ ! -f "$cert_path" || ! -f "$key_path" || $LE_RENEW_SELECTED -eq 1 ]]; then
+    log "Requesting Let's Encrypt certificate for $WEBUI_DOMAIN..."
+    certbot certonly --webroot -w /var/www/certbot -d "$WEBUI_DOMAIN" \
+      --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring
+  else
+    log "Using existing Let's Encrypt certificate for $WEBUI_DOMAIN (renew skipped by user)."
+  fi
+
+  [[ -f "$cert_path" && -f "$key_path" ]] || die "Let's Encrypt certificate files not found after certbot run"
+  systemctl enable certbot.timer >/dev/null 2>&1 || true
+  systemctl start certbot.timer >/dev/null 2>&1 || true
+  write_nginx_config "$cert_path" "$key_path"
+}
+
+configure_nginx_reverse_proxy() {
+  systemctl enable nginx >/dev/null 2>&1 || true
+  if [[ $USE_LETSENCRYPT -eq 1 ]]; then
+    setup_letsencrypt_cert
+  else
+    setup_self_signed_cert
+  fi
+  nginx -t >/dev/null || die "nginx configuration test failed"
+  systemctl restart nginx
+}
+
+print_final_summary() {
+  local iface_url
+  echo
+  echo "${C_CYAN}${C_BOLD}================ AWG Web UI Setup Summary ================${C_RESET}"
+  echo "${C_YELLOW}HTTPS mode:${C_RESET} $( [[ $USE_LETSENCRYPT -eq 1 ]] && echo "Let's Encrypt" || echo "Self-signed certificate" )"
+  if [[ $USE_LETSENCRYPT -eq 1 ]]; then
+    echo "${C_YELLOW}${C_BOLD}Primary URL:${C_RESET} ${C_GREEN}${C_BOLD}https://$WEBUI_DOMAIN${C_RESET}"
+  fi
+  echo "${C_YELLOW}${C_BOLD}Login:${C_RESET} ${C_CYAN}${C_BOLD}$WEBUI_USER${C_RESET}"
+  echo "${C_YELLOW}${C_BOLD}Password:${C_RESET} ${C_GREEN}${C_BOLD}$WEBUI_PASS${C_RESET}"
+  echo
+  echo "${C_YELLOW}Interface URLs:${C_RESET}"
+  while IFS= read -r iface_url; do
+    echo "  - ${C_GREEN}$iface_url${C_RESET}"
+  done < <(collect_interface_urls || true)
+  echo "${C_CYAN}${C_BOLD}==========================================================${C_RESET}"
+}
 
 awg_quick_present() {
   command -v awg-quick >/dev/null 2>&1
@@ -185,10 +473,13 @@ done
 [[ -f "$SYSTEMD_SRC/awg-uplink-firewall.service" ]] || die "missing firewall unit in systemd/"
 [[ -f "$SYSTEMD_SRC/dnscrypt-proxy.service" ]] || die "missing dnscrypt-proxy systemd unit (awg-uplink override)"
 
+prompt_install_profile
+prompt_webui_settings
+
 if command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl)..."
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx >/dev/null
 fi
 
 ensure_amneziawg
@@ -256,7 +547,7 @@ rm -f /etc/systemd/system/dnscrypt-proxy.socket.d/awg-uplink.conf
 if [[ ! -f "$CFG_DIR/webui.env" ]]; then
   log "Creating default $CFG_DIR/webui.env"
   cat >"$CFG_DIR/webui.env" <<'EOF'
-AWG_WEBUI_HOST=0.0.0.0
+AWG_WEBUI_HOST=127.0.0.1
 AWG_WEBUI_PORT=8080
 AWG_WEBUI_BASE_PATH=/
 AWG_WEBUI_NO_AUTH=0
@@ -310,6 +601,10 @@ if [[ ! -f "$CFG_DIR/dns.json" ]]; then
   "upstream_servers": ["77.88.8.8", "77.88.8.1"],
   "dnscrypt_server_names": ["cloudflare", "google"],
   "domains_list_updated_at": null,
+  "firewall": {
+    "egress_tcp_ports": [22],
+    "ingress_tcp_ports": [22, 80, 443]
+  },
   "amnezia_dns_watch_enabled": true,
   "amnezia_dns_container": "amnezia-dns",
   "amnezia_dns_network": "amnezia-dns-net",
@@ -351,11 +646,16 @@ if systemctl is-active --quiet systemd-resolved 2>/dev/null || systemctl is-enab
 fi
 
 # Backward-compatible defaults for existing configs.
-ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_HOST" "0.0.0.0"
+ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_HOST" "127.0.0.1"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_PORT" "8080"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_BASE_PATH" "/"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_NO_AUTH" "0"
 ensure_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_CFG_DIR" "/etc/awg-uplink-webui"
+set_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_HOST" "127.0.0.1"
+set_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_PORT" "8080"
+set_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_NO_AUTH" "0"
+set_env_key "$CFG_DIR/webui.env" "AWG_UI_USER" "$WEBUI_USER"
+set_env_key "$CFG_DIR/webui.env" "AWG_UI_PASS" "$WEBUI_PASS"
 dedupe_env_file "$CFG_DIR/webui.env"
 chmod 600 "$CFG_DIR/webui.env"
 
@@ -385,5 +685,8 @@ if [[ $NO_START -eq 0 ]]; then
   systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true
 fi
 
+configure_nginx_reverse_proxy
+
 log "Bootstrap completed."
+print_final_summary
 
