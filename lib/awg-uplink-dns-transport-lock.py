@@ -12,6 +12,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -188,6 +189,8 @@ def delete_legacy_and_own() -> None:
 
 def docker_ipam(network: str) -> tuple[str | None, str | None, str | None, str | None]:
     """IPv4 subnet, IPv4 gw, IPv6 subnet, IPv6 gw."""
+    if not shutil.which("docker"):
+        return None, None, None, None
     p = run(
         ["docker", "network", "inspect", network, "--format", "{{json .IPAM.Config}}"],
         check=False,
@@ -363,8 +366,9 @@ def main() -> int:
     try:
         sub4, gw4, sub6, gw6 = resolve_subnet_gateway(cfg)
     except ValueError as e:
-        print(f"awg-uplink-dns-transport-lock: {e}", file=sys.stderr)
-        return 1
+        # Graceful degradation for hosts without Docker/AmneziaDNS yet.
+        print(f"awg-uplink-dns-transport-lock: {e}; lock not applied", file=sys.stderr)
+        return 0
 
     body = build_nft(sub4, gw4, sub6, gw6)
     with tempfile.NamedTemporaryFile("w", suffix=".nft", delete=False, encoding="utf-8") as tmp:

@@ -777,6 +777,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         n = (name or "").strip()
         if not n:
             return False
+        if not shutil.which("docker"):
+            return False
         rc, out, _ = _run(["docker", "inspect", "-f", "{{.State.Running}}", n], timeout=6.0)
         return rc == 0 and (out or "").strip().lower() == "true"
 
