@@ -114,6 +114,20 @@ configure_nfqws_with_mtbuddy() {
   [[ -x "$ZAPRET_DIR/nfq/nfqws" ]] || die "nfqws binary is missing after mtbuddy setup nfqws"
 }
 
+ensure_mtproto_service_user() {
+  if ! getent group mtproto >/dev/null 2>&1; then
+    log "Creating missing system group: mtproto"
+    groupadd --system mtproto
+  fi
+  if ! id mtproto >/dev/null 2>&1; then
+    log "Creating missing system user: mtproto"
+    useradd --system --gid mtproto --home-dir /opt/mtproto-proxy --shell /usr/sbin/nologin mtproto
+  fi
+  if [[ -d /opt/mtproto-proxy ]]; then
+    chown -R mtproto:mtproto /opt/mtproto-proxy || true
+  fi
+}
+
 ensure_mtproto_netadmin_capability() {
   local dropin_dir="/etc/systemd/system/mtproto-proxy.service.d"
   local dropin_file="${dropin_dir}/90-awg-uplink-capabilities.conf"
@@ -296,6 +310,7 @@ main() {
   fix_cc_runtime
   prebuild_nfqws_if_needed
   install_mtproto_no_masking "$domain"
+  ensure_mtproto_service_user
   configure_nfqws_with_mtbuddy
   ensure_mtproto_netadmin_capability
   enable_mtproto_recovery
