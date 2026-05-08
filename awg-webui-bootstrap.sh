@@ -38,6 +38,24 @@ fi
 log() { echo "${C_BLUE}[awg-webui-bootstrap]${C_RESET} $*"; }
 die() { echo "${C_RED}[awg-webui-bootstrap] ERROR:${C_RESET} $*" >&2; exit 1; }
 
+# ubuntu-fan (и аналоги) подключают bind-interfaces; наш zzz-awg-uplink-base.conf задаёт bind-dynamic → dnsmasq падает.
+dnsmasq_quarantine_bind_interfaces_snippets() {
+  local quarantine=/var/lib/awg-uplink/dnsmasq-package-snippets
+  install -d -m 755 "$quarantine"
+  local f
+  for f in /etc/dnsmasq.d/ubuntu-fan; do
+    [[ -f "$f" ]] || continue
+    log "Отключаю $(basename "$f"): bind-interfaces несовместим с bind-dynamic в awg-uplink (переношу в $quarantine)."
+    mv -f -- "$f" "$quarantine/$(basename "$f").awg-disabled"
+  done
+  command -v dpkg-divert >/dev/null 2>&1 || return 0
+  if ! dpkg-divert --list | grep -Fq 'dnsmasq.d/ubuntu-fan'; then
+    dpkg-divert --quiet --local --no-rename \
+      --divert "$quarantine/ubuntu-fan.diverted" \
+      --add /etc/dnsmasq.d/ubuntu-fan 2>/dev/null || true
+  fi
+}
+
 WEBUI_DOMAIN=""
 WEBUI_USER="admin"
 WEBUI_PASS=""
@@ -490,6 +508,7 @@ if [[ $UPDATE_FILES_ONLY -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
   log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
+  dnsmasq_quarantine_bind_interfaces_snippets
 fi
 
 if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
@@ -655,9 +674,7 @@ DNS=127.0.0.1
 DNSStubListener=no
 EOF
 install -d -m 755 /var/lib/awg-uplink/dnsmasq-package-snippets
-if [[ -f /etc/dnsmasq.d/ubuntu-fan ]]; then
-  mv /etc/dnsmasq.d/ubuntu-fan /var/lib/awg-uplink/dnsmasq-package-snippets/ubuntu-fan.bak
-fi
+dnsmasq_quarantine_bind_interfaces_snippets
 rm -f /etc/dnsmasq.d/ubuntu-fan.awg-disabled /etc/dnsmasq.d/awg-uplink-base.conf
 cat >/etc/dnsmasq.d/zzz-awg-uplink-base.conf <<'EOF'
 # awg-uplink: DNS на всех интерфейсах. Сниппет ubuntu-fan отключаем: там bind-interfaces, он конфликтует с bind-dynamic и listen-address.
@@ -702,6 +719,7 @@ systemctl enable awg-uplink-geo-domain-nft-rotate.timer >/dev/null 2>&1 || true
 systemctl start awg-uplink-geo-domain-nft-rotate.timer >/dev/null 2>&1 || true
 
 log "Generating dnsmasq/dnscrypt configs (awg-uplink-dns-refresh)..."
+dnsmasq_quarantine_bind_interfaces_snippets
 AWG_WEBUI_CFG_DIR="$CFG_DIR" python3 /usr/local/sbin/awg-uplink-dns-refresh.py || log "warning: initial dns-refresh failed (check logs)"
 
 systemctl start awg-uplink-dns-refresh.timer >/dev/null 2>&1 || true
