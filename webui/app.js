@@ -4,6 +4,51 @@ function $(id) {
   return el;
 }
 
+let __busyOverlayCounter = 0;
+let __reconnectToastVisible = false;
+let __reconnectNoticeVisible = false;
+
+function ensureBusyOverlay() {
+  let root = document.getElementById("busyOverlay");
+  if (root) return root;
+  root = document.createElement("div");
+  root.id = "busyOverlay";
+  root.className = "busy-overlay hidden";
+  root.setAttribute("aria-live", "polite");
+  root.innerHTML = `
+    <div class="busy-overlay-card" role="status" aria-label="Выполняется">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div class="busy-text" id="busyOverlayText">Выполняется…</div>
+    </div>
+  `;
+  document.body.appendChild(root);
+  return root;
+}
+
+function showBusyOverlay(text = "Выполняется…") {
+  const root = ensureBusyOverlay();
+  const label = root.querySelector("#busyOverlayText");
+  if (label) label.textContent = text;
+  __busyOverlayCounter += 1;
+  root.classList.remove("hidden");
+}
+
+function hideBusyOverlay() {
+  const root = document.getElementById("busyOverlay");
+  if (!root) return;
+  __busyOverlayCounter = Math.max(0, __busyOverlayCounter - 1);
+  if (__busyOverlayCounter === 0) root.classList.add("hidden");
+}
+
+async function withBusyOverlay(text, fn) {
+  showBusyOverlay(text);
+  try {
+    return await fn();
+  } finally {
+    hideBusyOverlay();
+  }
+}
+
 function basePath() {
   return (window.__AWG_BASE_PATH__ || "/").replace(/\/?$/, "/");
 }
@@ -300,8 +345,10 @@ function initImportModal(state) {
         return;
       }
       setTunnelStatus("dot--warn", "awg-uplink: импорт конфигурации");
-      await postJson("/api/tunnel/validate", { config_text: cfgText });
-      await postJson("/api/tunnel/import", { config_text: cfgText });
+      await withBusyOverlay("Импортируем конфигурацию туннеля…", async () => {
+        await postJson("/api/tunnel/validate", { config_text: cfgText });
+        await postJson("/api/tunnel/import", { config_text: cfgText });
+      });
       toast("Конфиг awg-uplink импортирован.", "ok");
       await refreshTunnelStatus(state);
     } catch (e) {
@@ -313,7 +360,9 @@ function initImportModal(state) {
   restartBtn.addEventListener("click", async () => {
     try {
       setTunnelStatus("dot--warn", "awg-uplink: перезапуск");
-      await postJson("/api/tunnel/restart", {});
+      await withBusyOverlay("Перезапускаем туннель…", async () => {
+        await postJson("/api/tunnel/restart", {});
+      });
       toast("awg-uplink перезапущен.", "ok");
       await refreshTunnelStatus(state);
     } catch (e) {
@@ -326,7 +375,7 @@ function initImportModal(state) {
 }
 
 async function fetchJson(path) {
-  const res = await fetch(`${basePath()}${path.replace(/^\//, "")}`, { credentials: "include" });
+  const res = await fetchWithReconnect(`${basePath()}${path.replace(/^\//, "")}`, { credentials: "include" }, { retries: 12, delayMs: 1000 });
   if (res.status === 401) {
     const next = encodeURIComponent(window.location.pathname);
     window.location.href = `${basePath()}login.html?next=${next}`;
@@ -426,15 +475,81 @@ async function refreshSystemMetrics(state) {
   }
 }
 
-async function postJson(path, body) {
-  const res = await fetch(`${basePath()}${path.replace(/^\//, "")}`, {
+function isTransientFetchError(err) {
+  const msg = String((err && err.message) || err || "").toLowerCase();
+  return msg.includes("failed to fetch") || msg.includes("networkerror") || msg.includes("network error");
+}
+
+async function fetchWithReconnect(url, options = {}, cfg = {}) {
+  const retries = Math.max(0, Number(cfg.retries) || 0);
+  const delayMs = Math.max(100, Number(cfg.delayMs) || 1000);
+  const retryStatuses = Array.isArray(cfg.retryStatuses) ? cfg.retryStatuses : [502, 503, 504];
+  const showReconnectToast = cfg.showReconnectToast !== false;
+  let reconnectNotified = false;
+  const showReconnectNotice = cfg.showReconnectNotice !== false;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const res = await fetch(url, options);
+      if (res.status === 401) return res;
+      if (retryStatuses.includes(res.status) && attempt < retries) {
+        if (showReconnectNotice) showReconnectNoticeBanner();
+        if (showReconnectToast && !reconnectNotified && !__reconnectToastVisible) {
+          __reconnectToastVisible = true;
+          reconnectNotified = true;
+          toast("Соединение временно прервано, пытаемся переподключиться…", "warn", Math.max(2500, delayMs + 1200));
+        }
+        await sleepMs(delayMs);
+        continue;
+      }
+      if (reconnectNotified) __reconnectToastVisible = false;
+      hideReconnectNoticeBanner();
+      return res;
+    } catch (e) {
+      if (attempt >= retries || !isTransientFetchError(e)) throw e;
+      if (showReconnectNotice) showReconnectNoticeBanner();
+      if (showReconnectToast && !reconnectNotified && !__reconnectToastVisible) {
+        __reconnectToastVisible = true;
+        reconnectNotified = true;
+        toast("Соединение временно прервано, пытаемся переподключиться…", "warn", Math.max(2500, delayMs + 1200));
+      }
+      await sleepMs(delayMs);
+    }
+  }
+}
+
+async function postJson(path, body, retryCfg = null) {
+  const res = await fetchWithReconnect(
+    `${basePath()}${path.replace(/^\//, "")}`,
+    {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(body || {}),
-  });
+    },
+    retryCfg || { retries: 0 }
+  );
   if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
   return res.json().catch(() => ({}));
+}
+
+async function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function postJsonAwaitTask(path, body, timeoutMs = 20 * 60 * 1000) {
+  const started = await postJson(path, body, { retries: 5, delayMs: 1200, retryStatuses: [502, 503, 504] });
+  const taskId = started && started.task_id;
+  if (!taskId) return started;
+  const t0 = Date.now();
+  while (true) {
+    const st = await fetchJson(`/api/op/status?task_id=${encodeURIComponent(taskId)}`);
+    if (!st || st.running !== true) {
+      if (st && st.ok === false) throw new Error(st.error || "operation failed");
+      return (st && st.result) || {};
+    }
+    if (Date.now() - t0 > timeoutMs) throw new Error("Превышено время ожидания выполнения операции.");
+    await sleepMs(2000);
+  }
 }
 
 async function copyText(text) {
@@ -495,6 +610,12 @@ function setUserFormStatus(text, kind = "") {
   if (kind) el.classList.add(kind);
 }
 
+function setMtprotoPanelLocked(locked) {
+  const root = document.getElementById("mtprotoPanelRoot");
+  if (!root) return;
+  root.classList.toggle("mtproto-panel--locked", Boolean(locked));
+}
+
 function toast(message, kind = "ok", ttlMs = 1800) {
   let wrap = document.getElementById("toastWrap");
   if (!wrap) {
@@ -512,6 +633,29 @@ function toast(message, kind = "ok", ttlMs = 1800) {
     el.classList.remove("show");
     setTimeout(() => el.remove(), 220);
   }, ttlMs);
+}
+
+function showReconnectNoticeBanner() {
+  let el = document.getElementById("reconnectNotice");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "reconnectNotice";
+    el.className = "reconnect-notice hidden";
+    el.setAttribute("aria-live", "polite");
+    el.innerHTML = `
+      <div class="reconnect-notice__spinner" aria-hidden="true"></div>
+      <div class="reconnect-notice__text">Соединение временно прервано, пытаемся переподключиться…</div>
+    `;
+    document.body.appendChild(el);
+  }
+  __reconnectNoticeVisible = true;
+  el.classList.remove("hidden");
+}
+
+function hideReconnectNoticeBanner() {
+  __reconnectNoticeVisible = false;
+  const el = document.getElementById("reconnectNotice");
+  if (el) el.classList.add("hidden");
 }
 
 function renderMtprotoUsers(users) {
@@ -557,6 +701,12 @@ async function refreshMtprotoState(state) {
     $("mtpConfigText").value = s.config_text || "";
 
     const cfgOk = Boolean(s.config_exists);
+    const mtInstallBtn = document.getElementById("mtpInstallBtn");
+    if (mtInstallBtn) {
+      mtInstallBtn.textContent = cfgOk ? "Обновить MTProto" : "Установить MTProto";
+      mtInstallBtn.dataset.action = cfgOk ? "update" : "install";
+    }
+    setMtprotoPanelLocked(!cfgOk);
     const up = s.upstream || {};
     const ob = $("mtpOutboundMode");
     if (ob) {
@@ -840,7 +990,9 @@ function initDnsPanel() {
         amnezia_dns_watch_enabled: $("dnsAmneziaWatchToggle").checked,
         dns_transport_lock_enabled: $("dnsTransportLockToggle").checked,
       };
-      const res = await postJson("/api/dns/save", payload);
+      const res = await withBusyOverlay("Применяем настройки DNS…", async () => {
+        return await postJsonAwaitTask("/api/dns/save", payload);
+      });
       clearDnsPanelDirty();
       await refreshDnsPanel();
       const wr = res && res.amnezia_dns_watch;
@@ -857,6 +1009,95 @@ function initDnsPanel() {
 }
 
 function initMtprotoPanel(state) {
+  const mtInstallBtn = $("mtpInstallBtn");
+  let pendingMtprotoAction = "install";
+  const mtpDeleteOverlay = $("mtpDeleteUserConfirmOverlay");
+  const mtpDeleteText = $("mtpDeleteUserConfirmText");
+  let resolveDeleteConfirm = null;
+  const mtpWarnOverlay = $("mtpInstallWarnOverlay");
+  const closeMtpWarn = () => {
+    mtpWarnOverlay.classList.add("hidden");
+    mtpWarnOverlay.setAttribute("aria-hidden", "true");
+  };
+  const openMtpWarn = () => {
+    mtpWarnOverlay.classList.remove("hidden");
+    mtpWarnOverlay.setAttribute("aria-hidden", "false");
+    $("mtpInstallWarnContinueBtn").focus();
+  };
+  $("mtpInstallWarnCloseBtn").addEventListener("click", closeMtpWarn);
+  $("mtpInstallWarnCancelBtn").addEventListener("click", closeMtpWarn);
+  mtpWarnOverlay.addEventListener("click", (ev) => {
+    if (ev.target && ev.target.id === "mtpInstallWarnOverlay") closeMtpWarn();
+  });
+
+  const closeDeleteConfirm = (confirmed) => {
+    mtpDeleteOverlay.classList.add("hidden");
+    mtpDeleteOverlay.setAttribute("aria-hidden", "true");
+    const cb = resolveDeleteConfirm;
+    resolveDeleteConfirm = null;
+    if (typeof cb === "function") cb(Boolean(confirmed));
+  };
+  const openDeleteConfirm = (username) =>
+    new Promise((resolve) => {
+      resolveDeleteConfirm = resolve;
+      mtpDeleteText.textContent = `Вы действительно хотите удалить пользователя "${username}"? Это действие необратимо.`;
+      mtpDeleteOverlay.classList.remove("hidden");
+      mtpDeleteOverlay.setAttribute("aria-hidden", "false");
+      $("mtpDeleteUserConfirmOkBtn").focus();
+    });
+  $("mtpDeleteUserConfirmCloseBtn").addEventListener("click", () => closeDeleteConfirm(false));
+  $("mtpDeleteUserConfirmCancelBtn").addEventListener("click", () => closeDeleteConfirm(false));
+  $("mtpDeleteUserConfirmOkBtn").addEventListener("click", () => closeDeleteConfirm(true));
+  mtpDeleteOverlay.addEventListener("click", (ev) => {
+    if (ev.target && ev.target.id === "mtpDeleteUserConfirmOverlay") closeDeleteConfirm(false);
+  });
+
+  async function runMtprotoInstallAction(action) {
+    const title = action === "update" ? "Обновляем MTProto…" : "Устанавливаем MTProto…";
+    try {
+      mtInstallBtn.disabled = true;
+      const res = await withBusyOverlay(title, async () => {
+        await postJson("/api/mtproto/install", { action });
+        const startedAt = Date.now();
+        while (true) {
+          const st = await fetchJson("/api/mtproto/install/status");
+          if (!st || st.running !== true) {
+            if (st && st.ok === false) {
+              throw new Error(st.error || "install failed");
+            }
+            return st || {};
+          }
+          if (Date.now() - startedAt > 45 * 60 * 1000) {
+            throw new Error("Превышено время ожидания установки MTProto.");
+          }
+          await sleepMs(2000);
+        }
+      });
+      const ws = res && res.warnings;
+      if (Array.isArray(ws) && ws.length) {
+        toast(ws.join(" "), "warn", 5200);
+      }
+      toast(action === "update" ? "MTProto обновлен." : "MTProto установлен.", "ok", 2600);
+      await refreshMtprotoState(state);
+    } catch (e) {
+      toast(`Ошибка установки MTProto: ${e?.message || "unknown"}`, "error", 4200);
+      await refreshMtprotoState(state);
+    } finally {
+      mtInstallBtn.disabled = false;
+    }
+  }
+
+  $("mtpInstallWarnContinueBtn").addEventListener("click", async () => {
+    closeMtpWarn();
+    await runMtprotoInstallAction(pendingMtprotoAction);
+  });
+
+  mtInstallBtn.addEventListener("click", async () => {
+    const action = String(mtInstallBtn.dataset.action || "auto").toLowerCase();
+    pendingMtprotoAction = action === "update" ? "update" : "install";
+    openMtpWarn();
+  });
+
   $("mtpOpenAddUserBtn").addEventListener("click", () => {
     state.editingUser = "";
     $("mtpUserModalTitle").textContent = "Add User";
@@ -875,7 +1116,9 @@ function initMtprotoPanel(state) {
     outboundSel.addEventListener("change", async () => {
       const mode = String(outboundSel.value || "direct").trim();
       try {
-        const res = await postJson("/api/mtproto/outbound/set", { mode });
+        const res = await withBusyOverlay("Применяем исходящий интерфейс MTProto…", async () => {
+          return await postJson("/api/mtproto/outbound/set", { mode });
+        });
         if (!res || !res.ok) {
           toast((res && res.error) || "Не удалось применить исходящий интерфейс или перезапустить сервис.", "error", 4200);
         } else {
@@ -920,7 +1163,9 @@ function initMtprotoPanel(state) {
       return;
     }
     try {
-      await postJson("/api/mtproto/users/upsert", { username, secret });
+      await withBusyOverlay("Сохраняем пользователя MTProto…", async () => {
+        await postJson("/api/mtproto/users/upsert", { username, secret });
+      });
       setUserFormStatus("Сохранено.", "ok");
       await refreshMtprotoState(state); // immediate refresh
       toast("Пользователь сохранен.", "ok");
@@ -942,8 +1187,12 @@ function initMtprotoPanel(state) {
     const copyTmeUser = t.getAttribute("data-copy-tme");
     const editUser = t.getAttribute("data-edit-user");
     if (uname) {
+      const ok = await openDeleteConfirm(uname);
+      if (!ok) return;
       try {
-        await postJson("/api/mtproto/users/delete", { username: uname });
+        await withBusyOverlay("Удаляем пользователя MTProto…", async () => {
+          await postJson("/api/mtproto/users/delete", { username: uname });
+        });
         await refreshMtprotoState(state); // immediate refresh
         toast("Пользователь удален.", "ok");
       } catch {
@@ -955,7 +1204,9 @@ function initMtprotoPanel(state) {
     if (toggleUser) {
       const enabledNow = t.getAttribute("data-enabled") === "1";
       try {
-        await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: !enabledNow });
+        await withBusyOverlay("Обновляем статус пользователя MTProto…", async () => {
+          await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: !enabledNow });
+        });
         await refreshMtprotoState(state); // immediate refresh
         toast(enabledNow ? "Пользователь выключен." : "Пользователь включен.", "ok");
       } catch {
@@ -992,7 +1243,9 @@ function initMtprotoPanel(state) {
 
   $("mtpConfigSaveBtn").addEventListener("click", async () => {
     try {
-      const res = await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
+      const res = await withBusyOverlay("Сохраняем config.toml MTProto…", async () => {
+        return await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
+      });
       setStatusById("mtpConfigStatus", "dot--ok", "сохранено");
       $("mtpConfigModalOverlay").classList.add("hidden");
       await refreshMtprotoState(state);
@@ -1107,7 +1360,9 @@ function initInterfaceSave() {
     }
     try {
       btn.disabled = true;
-      const res = await postJson("/api/net/routing/save", body);
+      const res = await withBusyOverlay("Применяем маршрутизацию интерфейсов…", async () => {
+        return await postJsonAwaitTask("/api/net/routing/save", body);
+      });
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
       if (res && res.config && res.config.route_mode && window.__awgState) {
         window.__awgState.routeMode = res.config.route_mode;
@@ -1168,8 +1423,10 @@ function initNetplanEditor() {
     try {
       btn.disabled = true;
       errHint.textContent = "";
-      await postJson("/api/netplan/validate", { config_text: text.value });
-      const res = await postJson("/api/netplan/save", { config_text: text.value });
+      const res = await withBusyOverlay("Применяем netplan… связь может кратко пропасть, маршруты восстановятся автоматически.", async () => {
+        await postJson("/api/netplan/validate", { config_text: text.value });
+        return await postJsonAwaitTask("/api/netplan/save", { config_text: text.value });
+      });
       hint.textContent = `Файл: ${res.path || "—"}`;
       toast("Netplan сохранен и применен.", "ok", 2200);
       close();
@@ -1290,7 +1547,7 @@ function initRoutingPanel(state) {
       amnezia_dns_watch_enabled: true,
       dns_transport_lock_enabled: $("dnsTransportLockToggle").checked,
     };
-    await postJson("/api/dns/save", payload);
+    await postJsonAwaitTask("/api/dns/save", payload);
     clearDnsPanelDirty();
     await refreshDnsPanel();
   }
@@ -1467,7 +1724,9 @@ function initRoutingPanel(state) {
     }
     setRouteModeStatus(mode, false);
     try {
-      const res = await postJson("/api/net/routing/mode", { route_mode: mode });
+      const res = await withBusyOverlay("Применяем режим маршрутизации…", async () => {
+        return await postJsonAwaitTask("/api/net/routing/mode", { route_mode: mode });
+      });
       state.routeMode = (res && res.config && res.config.route_mode) || mode;
       state.persistedRouteMode = state.routeMode;
       if (res && res.config && res.config.geo) {
@@ -1514,7 +1773,9 @@ function initRoutingPanel(state) {
         toast("Нужно выбрать egress интерфейс и IPv4.", "error", 2200);
         return;
       }
-      const res = await postJson("/api/net/routing/save", body);
+      const res = await withBusyOverlay("Применяем georouting…", async () => {
+        return await postJsonAwaitTask("/api/net/routing/save", body);
+      });
       state.routeMode = (res && res.config && res.config.route_mode) || "georouting";
       state.persistedRouteMode = state.routeMode;
       for (const b of root.querySelectorAll(".routing-mode-btn")) {

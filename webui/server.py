@@ -12,7 +12,9 @@ import shlex
 import shutil
 import socket
 import subprocess
+import threading
 import time
+import tomllib
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,6 +57,22 @@ def _run(cmd: list[str], timeout: float = 2.5) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
+def _reload_or_restart_service(unit: str, reload_timeout: float = 8.0, restart_timeout: float = 20.0) -> tuple[int, str, str, str]:
+    """
+    Try systemctl reload first to avoid short connection drops,
+    fallback to restart when reload is unsupported or fails.
+    Returns (rc, out, err, action), where action is "reload" or "restart".
+    """
+    u = str(unit or "").strip()
+    if not u:
+        return 1, "", "empty unit name", "restart"
+    rc, out, err = _run(["systemctl", "reload", u], timeout=reload_timeout)
+    if rc == 0:
+        return rc, out, err, "reload"
+    rc, out, err = _run(["systemctl", "restart", u], timeout=restart_timeout)
+    return rc, out, err, "restart"
+
+
 def _read_text(path: str, default: str = "") -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -68,6 +86,30 @@ def _write_text(path: str, data: str):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(data)
     os.replace(tmp, path)
+
+
+def _validate_toml_text(cfg_text: str) -> tuple[bool, str]:
+    try:
+        tomllib.loads(cfg_text)
+        return True, ""
+    except Exception as ex:
+        return False, str(ex)
+
+
+_MTPROTO_INSTALL_LOCK = threading.Lock()
+_MTPROTO_INSTALL_STATE: dict = {
+    "running": False,
+    "action": "",
+    "started_at": 0,
+    "finished_at": 0,
+    "ok": None,
+    "error": "",
+    "warnings": [],
+    "phase": "",
+}
+
+_ASYNC_OPS_LOCK = threading.Lock()
+_ASYNC_OPS: dict[str, dict] = {}
 
 
 def _sanitize_tunnel_config(cfg_text: str) -> str:
@@ -366,10 +408,6 @@ def _mtproto_public_ip_from_iface(iface: dict) -> str:
     return ingress_ip
 
 
-def _mtproto_middle_nat_from_iface(iface: dict) -> str:
-    return str(iface.get("egress_ip", "")).strip()
-
-
 def _ipv4_literal_ok(s: str) -> bool:
     try:
         ipaddress.IPv4Address(str(s).strip())
@@ -464,6 +502,33 @@ def _toml_merge_keys_in_section(cfg_text: str, section: str, string_values: dict
             new_body.append(fmt_line(k, to_set[k]))
     out = lines[:start] + [sec_header] + new_body + lines[end:]
     return "\n".join(out).rstrip() + "\n"
+
+
+def _upsert_mtproto_censorship_cfg(cfg_text: str, domain: str, mask_port: int) -> str:
+    text = cfg_text or ""
+    if "[censorship]" not in text:
+        text = text.rstrip() + ("\n" if text.strip() else "") + "\n[censorship]\n"
+    start = text.index("[censorship]")
+    rest = text[start:]
+    m = re.search(r"\n\[[^\n]+\]", rest[1:])
+    end = start + (m.start() + 1 if m else len(rest))
+    section = text[start:end]
+
+    def replace_or_add(section_text: str, key: str, value: str) -> str:
+        pattern = re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+        if pattern.search(section_text):
+            return pattern.sub(rf"\g<1>{value}", section_text)
+        if not section_text.endswith("\n"):
+            section_text += "\n"
+        return section_text + f"{key} = {value}\n"
+
+    section = replace_or_add(section, "mask", "true")
+    section = replace_or_add(section, "mask_port", str(int(mask_port)))
+    section = replace_or_add(section, "drs", "true")
+    dom = str(domain or "").strip()
+    if dom:
+        section = replace_or_add(section, "tls_domain", f'"{dom}"')
+    return text[:start] + section + text[end:]
 
 
 class WebUIHandler(SimpleHTTPRequestHandler):
@@ -601,7 +666,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return hmac.compare_digest(expected, response)
 
     def _default_iface_firewall(self) -> dict:
-        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443]}
+        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000]}
 
     def _iface_firewall_for_response(self, cfg: dict) -> dict:
         base = self._default_iface_firewall()
@@ -759,6 +824,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return None
 
     def _api_dns_config(self):
+        payload = self._dns_config_payload()
+        return self._send_json(200, payload)
+
+    def _dns_config_payload(self) -> dict:
         cfg = dict(self._load_dns_config())
         cfg.pop("firewall", None)
         base = self._default_dns_cfg()
@@ -787,34 +856,31 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if not container_present:
             detail_ui = self._MSG_AMNEZIA_DNS_MISSING
         tl_rc, _, _ = _run(["nft", "list", "table", "inet", "awg_uplink_dns_transport_lock"], timeout=2.0)
-        return self._send_json(
-            200,
-            {
-                "config": cfg,
-                "dnsmasq_active": self._service_is_active("dnsmasq.service"),
-                "dnscrypt_active": self._service_is_active("dnscrypt-proxy.service"),
-                "domains_list_updated_at": ts_int,
-                "config_dir": self._webui_cfg_dir(),
-                "dns_transport_lock": {
-                    "enabled": self._coerce_dns_bool(cfg.get("dns_transport_lock_enabled")),
-                    "nft_active": tl_rc == 0,
-                },
-                "amnezia_dns_watch": {
-                    "enabled": self._coerce_dns_bool(cfg.get("amnezia_dns_watch_enabled")),
-                    "service_active": watch_svc,
-                    "status": str(st.get("status", "") or "unknown"),
-                    "detail": detail_ui,
-                    "forward_ip": str(st.get("forward_ip", "") or ""),
-                    "container": str(st.get("container", "") or ""),
-                    "last_run_unix": st.get("last_run_unix"),
-                    "last_patch_unix": st.get("last_patch_unix"),
-                    "container_present": container_present,
-                    "domain_routing_requires": domain_lock,
-                    "toggle_locked": toggle_locked,
-                    "toggle_checked": toggle_checked,
-                },
+        return {
+            "config": cfg,
+            "dnsmasq_active": self._service_is_active("dnsmasq.service"),
+            "dnscrypt_active": self._service_is_active("dnscrypt-proxy.service"),
+            "domains_list_updated_at": ts_int,
+            "config_dir": self._webui_cfg_dir(),
+            "dns_transport_lock": {
+                "enabled": self._coerce_dns_bool(cfg.get("dns_transport_lock_enabled")),
+                "nft_active": tl_rc == 0,
             },
-        )
+            "amnezia_dns_watch": {
+                "enabled": self._coerce_dns_bool(cfg.get("amnezia_dns_watch_enabled")),
+                "service_active": watch_svc,
+                "status": str(st.get("status", "") or "unknown"),
+                "detail": detail_ui,
+                "forward_ip": str(st.get("forward_ip", "") or ""),
+                "container": str(st.get("container", "") or ""),
+                "last_run_unix": st.get("last_run_unix"),
+                "last_patch_unix": st.get("last_patch_unix"),
+                "container_present": container_present,
+                "domain_routing_requires": domain_lock,
+                "toggle_locked": toggle_locked,
+                "toggle_checked": toggle_checked,
+            },
+        }
 
     def _api_dns_save(self, body: dict):
         cfg = self._load_dns_config()
@@ -868,7 +934,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             ["python3", "/usr/local/sbin/awg-uplink-amnezia-dns-watch.py", "--once"],
             timeout=45.0,
         )
-        return self._api_dns_config()
+        return self._dns_config_payload()
 
     def _normalize_geo_entry(self, item) -> dict:
         if isinstance(item, str):
@@ -1026,7 +1092,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _mkdir(self._webui_cfg_dir())
         _write_text(self._webui_geo_json(), json.dumps(g, ensure_ascii=False, indent=2) + "\n")
 
-    def _write_iface_env(self, cfg: dict):
+    def _write_iface_env(self, cfg: dict, mtproto_outbound_mode: str | None = None):
         egress_dev = str(cfg.get("egress_dev", "")).strip()
         egress_ip = str(cfg.get("egress_ip", "")).strip()
         egress_gw = str(cfg.get("egress_gw", "")).strip()
@@ -1044,6 +1110,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             apply_mode = "tunnel" if target == "egress" else "egress"
         else:
             apply_mode = route_mode
+        mtp_mode = str(mtproto_outbound_mode or "").strip().lower()
+        if mtp_mode not in ("direct", "egress", "tunnel"):
+            mtp_mode = ""
 
         ingress_enabled = bool(
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
@@ -1063,6 +1132,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "EGRESS_TABLE=202",
             "EGRESS_RULE_PRIO=80",
             f"ROUTE_MODE={shlex.quote(apply_mode)}",
+            f"MTPROTO_OUTBOUND_MODE={shlex.quote(mtp_mode)}",
             "# Tunnel + Docker-VPN: optional knobs for awg-webui-iface-routing-apply.sh",
             "# DOCKER_FORCE_PORT=39983",
             "# DOCKER_MARK_IN=amn0",
@@ -1526,9 +1596,298 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _write_text(self._mtproto_prefs_path(), json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
 
     def _tunnel_iface_for_mtproto(self) -> str:
+        return "awg-uplink"
+
+    def _load_iface_env_values(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        raw = _read_text(self._webui_iface_env(), "")
+        for line in raw.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+        return out
+
+    def _detect_tunnel_middle_nat_ip(self) -> str:
+        if not self._tunnel_iface_up():
+            return ""
+        if not shutil.which("curl"):
+            return ""
+        probes = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+        ]
+        for url in probes:
+            rc, out, _ = _run(
+                [
+                    "curl",
+                    "-4",
+                    "--interface",
+                    "awg-uplink",
+                    "--connect-timeout",
+                    "2",
+                    "--max-time",
+                    "5",
+                    "-fsSL",
+                    url,
+                ],
+                timeout=6.0,
+            )
+            if rc != 0:
+                continue
+            ip = (out or "").strip()
+            if _ipv4_literal_ok(ip):
+                return ip
+        return ""
+
+    def _derive_middle_proxy_nat_ip(self, iface: dict, mode: str) -> str:
+        mode_norm = str(mode or "").strip().lower()
+        egress_ip = str(iface.get("egress_ip", "")).strip()
+        if mode_norm == "egress":
+            return egress_ip
+        if mode_norm == "tunnel":
+            return self._detect_tunnel_middle_nat_ip()
+        # direct: follow current default-route mode from interfaces.env (ROUTE_MODE).
+        env_map = self._load_iface_env_values()
+        route_mode = str(env_map.get("ROUTE_MODE", "")).strip().lower()
+        if route_mode == "tunnel":
+            return self._detect_tunnel_middle_nat_ip()
+        return egress_ip
+
+    def _mtproto_install_status(self) -> dict:
+        with _MTPROTO_INSTALL_LOCK:
+            st = dict(_MTPROTO_INSTALL_STATE)
+            st["warnings"] = list(st.get("warnings") or [])
+            return st
+
+    def _set_mtproto_install_status(self, **updates):
+        with _MTPROTO_INSTALL_LOCK:
+            _MTPROTO_INSTALL_STATE.update(updates)
+
+    def _start_async_op(self, name: str, worker):
+        task_id = secrets.token_hex(12)
+        with _ASYNC_OPS_LOCK:
+            _ASYNC_OPS[task_id] = {
+                "task_id": task_id,
+                "name": name,
+                "running": True,
+                "ok": None,
+                "error": "",
+                "result": None,
+                "started_at": int(time.time()),
+                "finished_at": 0,
+            }
+
+        def _runner():
+            try:
+                result = worker()
+                with _ASYNC_OPS_LOCK:
+                    st = _ASYNC_OPS.get(task_id, {})
+                    st.update(
+                        {
+                            "running": False,
+                            "ok": True,
+                            "result": result,
+                            "finished_at": int(time.time()),
+                        }
+                    )
+                    _ASYNC_OPS[task_id] = st
+            except Exception as ex:
+                with _ASYNC_OPS_LOCK:
+                    st = _ASYNC_OPS.get(task_id, {})
+                    st.update(
+                        {
+                            "running": False,
+                            "ok": False,
+                            "error": str(ex),
+                            "finished_at": int(time.time()),
+                        }
+                    )
+                    _ASYNC_OPS[task_id] = st
+
+        threading.Thread(target=_runner, daemon=True).start()
+        return task_id
+
+    def _get_async_op(self, task_id: str) -> dict | None:
+        with _ASYNC_OPS_LOCK:
+            st = _ASYNC_OPS.get(task_id)
+            return dict(st) if isinstance(st, dict) else None
+
+    def _op_net_routing_save(self, body: dict) -> dict:
+        prev = self._load_iface_config()
+        cfg = {
+            "egress_dev": str(body.get("egress_dev", "")).strip(),
+            "egress_ip": str(body.get("egress_ip", "")).strip(),
+            "egress_gw": str(body.get("egress_gw", "")).strip(),
+            "ingress_dev": str(body.get("ingress_dev", "")).strip(),
+            "ingress_ip": str(body.get("ingress_ip", "")).strip(),
+            "ingress_gw": str(body.get("ingress_gw", "")).strip(),
+            "route_mode": str(body.get("route_mode", "") or "egress").strip().lower(),
+            "geo": self._normalize_geo_cfg(body.get("geo", {})),
+            "firewall": self._merge_iface_firewall_save(prev, body.get("firewall")),
+            "updated_at": int(time.time()),
+        }
+        if cfg["route_mode"] not in ("egress", "tunnel", "georouting"):
+            cfg["route_mode"] = "egress"
+        route_mode_warning = ""
+        if cfg.get("route_mode") == "tunnel" and not self._tunnel_iface_up():
+            cfg["route_mode"] = "egress"
+            route_mode_warning = "awg-uplink is not UP; сохранено и применено в режиме egress (split egress/ingress)."
+        ok, err = self._validate_iface_cfg(cfg)
+        if not ok:
+            raise RuntimeError(err)
+        cfg["egress_gw"] = self._normalize_gateway(cfg["egress_dev"], cfg["egress_ip"], cfg["egress_gw"])
+        cfg["ingress_gw"] = self._normalize_gateway(
+            cfg["ingress_dev"] or cfg["egress_dev"], cfg["ingress_ip"], cfg["ingress_gw"]
+        )
+        self._store_geo_config(cfg.get("geo", {}))
+        self._store_iface_config(cfg)
+        self._write_iface_env(cfg)
+        self._apply_iface_routing()
+        self._apply_geo_ip_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
+        self._apply_geo_domain_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
+        try:
+            self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
+        except Exception:
+            pass
+        runtime = self._routing_runtime_status(cfg)
+        if not runtime.get("applied"):
+            raise RuntimeError("routing not applied")
+        resp = {
+            "ok": True,
+            "config": (lambda x: (dict(x) | {"geo": self._load_geo_config()}) if isinstance(x, dict) else {})(
+                self._load_iface_config()
+            ),
+            "runtime": runtime,
+            "config_dir": self._webui_cfg_dir(),
+        }
+        if route_mode_warning:
+            resp["warning"] = route_mode_warning
+        mt_extra = self._maybe_sync_mtproto_after_iface_change()
+        if mt_extra:
+            resp["mtproto_sync_warning"] = mt_extra
+        return resp
+
+    def _op_net_routing_mode(self, body: dict) -> dict:
+        mode = str(body.get("route_mode", "")).strip().lower()
+        if mode not in ("egress", "tunnel", "georouting"):
+            raise RuntimeError("route_mode must be egress|tunnel|georouting")
+        if mode == "tunnel" and not self._tunnel_iface_up():
+            raise RuntimeError("awg-uplink tunnel is not UP")
         cfg = self._load_iface_config()
-        ing = str(cfg.get("ingress_dev", "")).strip()
-        return ing or "awg-uplink"
+        if not cfg:
+            raise RuntimeError("interface config is empty")
+        cfg["route_mode"] = mode
+        cfg["updated_at"] = int(time.time())
+        cfg["geo"] = self._load_geo_config()
+        self._store_iface_config(cfg)
+        self._write_iface_env(cfg)
+        self._apply_iface_routing()
+        self._apply_geo_ip_runtime(cfg)
+        self._apply_geo_domain_runtime(cfg)
+        try:
+            self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
+        except Exception:
+            pass
+        runtime = self._routing_runtime_status(cfg)
+        if not runtime.get("applied"):
+            raise RuntimeError("routing not applied")
+        mt_extra = self._maybe_sync_mtproto_after_iface_change()
+        out = {"ok": True, "config": cfg, "runtime": runtime}
+        if mt_extra:
+            out["mtproto_sync_warning"] = mt_extra
+        return out
+
+    def _op_dns_save(self, body: dict) -> dict:
+        self._install_iface_runtime()
+        return self._api_dns_save(body)
+
+    def _op_netplan_save(self, body: dict) -> dict:
+        cfg_text = str(body.get("config_text", ""))
+        if not cfg_text.strip():
+            raise RuntimeError("config_text is empty")
+        pth = self._netplan_path()
+        ok, err = self._validate_netplan_text(pth, cfg_text)
+        if not ok:
+            raise RuntimeError(f"netplan syntax error:\n{err}")
+        _mkdir(str(Path(pth).parent))
+        _write_text(pth, cfg_text if cfg_text.endswith("\n") else (cfg_text + "\n"))
+        rc, out, err = _run(["netplan", "apply"], timeout=20.0)
+        if rc != 0:
+            raise RuntimeError((err or out or "netplan apply failed").strip())
+        cfg = self._load_iface_config()
+        if isinstance(cfg, dict) and cfg:
+            cfg["geo"] = self._load_geo_config()
+            self._write_iface_env(cfg)
+            self._apply_iface_routing()
+            self._apply_geo_ip_runtime(cfg, run_refresh_now=False)
+            self._apply_geo_domain_runtime(cfg, run_refresh_now=False)
+            try:
+                self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
+            except Exception:
+                pass
+            try:
+                self._maybe_sync_mtproto_after_iface_change()
+            except Exception:
+                pass
+        return {"ok": True, "path": pth}
+
+    def _run_mtproto_install_worker(self, action: str):
+        installer = "/usr/local/sbin/awg-mtproto-install.sh"
+        self._set_mtproto_install_status(phase="install", error="", warnings=[], ok=None)
+        try:
+            rc, out, err = _run([installer], timeout=1800.0)
+            if rc != 0:
+                msg = (err or out or "mtproto install failed").strip()
+                self._set_mtproto_install_status(
+                    running=False,
+                    finished_at=int(time.time()),
+                    ok=False,
+                    error=msg,
+                    phase="failed",
+                )
+                return
+
+            warnings: list[str] = []
+            self._set_mtproto_install_status(phase="drs")
+            drs_rc, drs_out, drs_err = _run(["mtbuddy", "setup", "drs"], timeout=120.0)
+            if drs_rc != 0:
+                warnings.append((drs_err or drs_out or "mtbuddy setup drs failed").strip())
+
+            self._set_mtproto_install_status(phase="sync")
+            sync = self._sync_mtproto_derived_config(apply_upstream=True)
+            if not sync.get("ok"):
+                msg = str(sync.get("error", "")).strip() or "mtproto sync failed"
+                self._set_mtproto_install_status(
+                    running=False,
+                    finished_at=int(time.time()),
+                    ok=False,
+                    error=msg,
+                    warnings=warnings,
+                    phase="failed",
+                )
+                return
+            for w in sync.get("warnings") or []:
+                if w:
+                    warnings.append(str(w))
+
+            self._set_mtproto_install_status(
+                running=False,
+                finished_at=int(time.time()),
+                ok=True,
+                error="",
+                warnings=warnings,
+                phase="done",
+            )
+        except Exception as ex:
+            self._set_mtproto_install_status(
+                running=False,
+                finished_at=int(time.time()),
+                ok=False,
+                error=str(ex),
+                phase="failed",
+            )
 
     def _sync_mtproto_derived_config(
         self,
@@ -1547,6 +1906,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 self._store_mtproto_prefs({"outbound_mode": pm})
         prefs = self._load_mtproto_prefs()
         mode = _effective_mtproto_outbound_mode(prefs, cfg_text, iface)
+        try:
+            self._write_iface_env(iface, mtproto_outbound_mode=mode)
+        except Exception:
+            pass
         warnings: list[str] = []
         egress_dev = str(iface.get("egress_dev", "")).strip()
         tunnel_if = self._tunnel_iface_for_mtproto()
@@ -1558,8 +1921,18 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 )
             else:
                 new_text = _patch_mtproto_upstream_cfg(new_text, mode, egress_dev, tunnel_if)
+        parsed_now = _parse_simple_toml(new_text) if new_text.strip() else {}
+        censor_now = parsed_now.get("censorship", {}) if isinstance(parsed_now.get("censorship", {}), dict) else {}
+        env_domain = str(os.environ.get("AWG_UI_DOMAIN", "") or "").strip()
+        domain_for_mask = env_domain or str(censor_now.get("tls_domain", "") or "").strip()
+        env_mask_port = str(os.environ.get("AWG_UI_MASK_PORT", "") or "").strip()
+        try:
+            mask_port_for_mask = int(env_mask_port) if env_mask_port else int(censor_now.get("mask_port", 5000) or 5000)
+        except Exception:
+            mask_port_for_mask = 5000
+        new_text = _upsert_mtproto_censorship_cfg(new_text, domain_for_mask, mask_port_for_mask)
         pub = _mtproto_public_ip_from_iface(iface)
-        mid = _mtproto_middle_nat_from_iface(iface)
+        mid = self._derive_middle_proxy_nat_ip(iface, mode)
         server_updates: dict[str, str] = {}
         if pub:
             server_updates["public_ip"] = pub
@@ -1572,12 +1945,24 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         except OSError as e:
             return {"ok": False, "error": str(e)}
         _run(["chown", "mtproto:mtproto", cfg_path], timeout=2.0)
+        # MTProto policy routing lives in awg-webui-ifaces runtime script/unit.
+        # Reinstall+restart the routing runtime to ensure latest project changes are applied.
+        try:
+            self._apply_iface_routing()
+        except Exception as ex:
+            return {
+                "ok": False,
+                "mode": mode,
+                "warnings": warnings,
+                "error": str(ex),
+            }
         svc = self._mtproto_service_name()
-        rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
+        rc, out, err, action = _reload_or_restart_service(svc, reload_timeout=8.0, restart_timeout=20.0)
         resp: dict = {
             "ok": rc == 0,
             "mode": mode,
             "warnings": warnings,
+            "service_action": action,
             "public_ip": pub,
             "middle_proxy_nat_ip": server_updates.get("middle_proxy_nat_ip", ""),
         }
@@ -1820,7 +2205,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             endpoint_target = m_target
         else:
             nginx_unit = os.environ.get("AWG_MTPROTO_NGINX_SERVICE", "nginx.service")
-            timer_unit = os.environ.get("AWG_MTPROTO_HEALTH_TIMER", "mtproto-proxy-health.timer")
+            timer_unit = os.environ.get("AWG_MTPROTO_HEALTH_TIMER", "mtproto-mask-health.timer")
             nginx_state = self._unit_state(nginx_unit)
             timer_state = self._unit_state(timer_unit)
             endpoint_host = "127.0.0.1"
@@ -1847,7 +2232,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             tunnel_if_cfg = str(tunnel_sec_p.get("interface", "") or "").strip()
         effective_tunnel_iface = self._tunnel_iface_for_mtproto()
         pub_derived = _mtproto_public_ip_from_iface(iface_rt)
-        mid_raw = _mtproto_middle_nat_from_iface(iface_rt)
+        mid_raw = self._derive_middle_proxy_nat_ip(iface_rt, ui_mode)
         mid_derived = mid_raw if _ipv4_literal_ok(mid_raw) else ""
 
         return self._send_json(
@@ -2011,6 +2396,23 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 return self._send_text(401, "Unauthorized")
             return self._api_mtproto_state()
 
+        if sp == "/api/mtproto/install/status":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            return self._send_json(200, self._mtproto_install_status())
+
+        if sp == "/api/op/status":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            q = parse_qs(urlparse(self.path).query)
+            task_id = str((q.get("task_id") or [""])[0]).strip()
+            if not task_id:
+                return self._send_text(400, "task_id is required")
+            st = self._get_async_op(task_id)
+            if not st:
+                return self._send_text(404, "task not found")
+            return self._send_json(200, st)
+
         # SPA routes
         if sp == "/" or sp == "/app" or sp == "/app/":
             self.path = self._base_path + "index.html"
@@ -2125,142 +2527,29 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
-            prev = self._load_iface_config()
-            cfg = {
-                "egress_dev": str(body.get("egress_dev", "")).strip(),
-                "egress_ip": str(body.get("egress_ip", "")).strip(),
-                "egress_gw": str(body.get("egress_gw", "")).strip(),
-                "ingress_dev": str(body.get("ingress_dev", "")).strip(),
-                "ingress_ip": str(body.get("ingress_ip", "")).strip(),
-                "ingress_gw": str(body.get("ingress_gw", "")).strip(),
-                "route_mode": str(body.get("route_mode", "") or "egress").strip().lower(),
-                "geo": self._normalize_geo_cfg(body.get("geo", {})),
-                "firewall": self._merge_iface_firewall_save(prev, body.get("firewall")),
-                "updated_at": int(time.time()),
-            }
-            if cfg["route_mode"] not in ("egress", "tunnel", "georouting"):
-                cfg["route_mode"] = "egress"
-            route_mode_warning = ""
-            if cfg.get("route_mode") == "tunnel" and not self._tunnel_iface_up():
-                cfg["route_mode"] = "egress"
-                route_mode_warning = (
-                    "awg-uplink is not UP; сохранено и применено в режиме egress (split egress/ingress)."
-                )
-            ok, err = self._validate_iface_cfg(cfg)
-            if not ok:
-                return self._send_text(400, err)
-            cfg["egress_gw"] = self._normalize_gateway(cfg["egress_dev"], cfg["egress_ip"], cfg["egress_gw"])
-            cfg["ingress_gw"] = self._normalize_gateway(
-                cfg["ingress_dev"] or cfg["egress_dev"],
-                cfg["ingress_ip"],
-                cfg["ingress_gw"],
-            )
-            try:
-                self._store_geo_config(cfg.get("geo", {}))
-                self._store_iface_config(cfg)
-                self._write_iface_env(cfg)
-                self._apply_iface_routing()
-                # Немедленный прогон geo-ip только по кнопке «Применить» в georouting (app.js).
-                self._apply_geo_ip_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
-                self._apply_geo_domain_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
-            except Exception as e:
-                return self._send_text(500, f"apply failed: {e}")
-            runtime = self._routing_runtime_status(cfg)
-            if not runtime.get("applied"):
-                return self._send_json(
-                    500,
-                    {
-                        "ok": False,
-                        "error": "routing not applied",
-                        "config": cfg,
-                        "runtime": runtime,
-                    },
-                )
-            try:
-                self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
-            except Exception:
-                pass
-            resp = {
-                "ok": True,
-                "config": (lambda x: (dict(x) | {"geo": self._load_geo_config()}) if isinstance(x, dict) else {})(
-                    self._load_iface_config()
-                ),
-                "runtime": runtime,
-                "config_dir": self._webui_cfg_dir(),
-            }
-            if route_mode_warning:
-                resp["warning"] = route_mode_warning
-            mt_extra = self._maybe_sync_mtproto_after_iface_change()
-            if mt_extra:
-                resp["mtproto_sync_warning"] = mt_extra
-            return self._send_json(200, resp)
+            task_id = self._start_async_op("net-routing-save", lambda: self._op_net_routing_save(body))
+            return self._send_json(202, {"ok": True, "task_id": task_id})
 
         if sp == "/api/net/routing/mode":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
-            mode = str(body.get("route_mode", "")).strip().lower()
-            if mode not in ("egress", "tunnel", "georouting"):
-                return self._send_text(400, "route_mode must be egress|tunnel|georouting")
-            if mode == "tunnel" and not self._tunnel_iface_up():
-                return self._send_text(409, "awg-uplink tunnel is not UP")
-            cfg = self._load_iface_config()
-            if not cfg:
-                return self._send_text(400, "interface config is empty")
-            cfg["route_mode"] = mode
-            cfg["updated_at"] = int(time.time())
-            cfg["geo"] = self._load_geo_config()
-            try:
-                self._store_iface_config(cfg)
-                self._write_iface_env(cfg)
-                self._apply_iface_routing()
-                self._apply_geo_ip_runtime(cfg)
-                self._apply_geo_domain_runtime(cfg)
-            except Exception as e:
-                return self._send_text(500, f"apply failed: {e}")
-            runtime = self._routing_runtime_status(cfg)
-            if not runtime.get("applied"):
-                return self._send_json(500, {"ok": False, "error": "routing not applied", "runtime": runtime})
-            try:
-                self._sync_dns_amnezia_if_domain_routing(self._load_iface_config())
-            except Exception:
-                pass
-            mt_extra = self._maybe_sync_mtproto_after_iface_change()
-            out = {"ok": True, "config": cfg, "runtime": runtime}
-            if mt_extra:
-                out["mtproto_sync_warning"] = mt_extra
-            return self._send_json(200, out)
+            task_id = self._start_async_op("net-routing-mode", lambda: self._op_net_routing_mode(body))
+            return self._send_json(202, {"ok": True, "task_id": task_id})
 
         if sp == "/api/dns/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
-            try:
-                self._install_iface_runtime()
-                return self._api_dns_save(body)
-            except Exception as e:
-                return self._send_text(500, f"dns apply failed: {e}")
+            task_id = self._start_async_op("dns-save", lambda: self._op_dns_save(body))
+            return self._send_json(202, {"ok": True, "task_id": task_id})
 
         if sp == "/api/netplan/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             body = self._read_json_body()
-            cfg_text = str(body.get("config_text", ""))
-            if not cfg_text.strip():
-                return self._send_text(400, "config_text is empty")
-            pth = self._netplan_path()
-            try:
-                ok, err = self._validate_netplan_text(pth, cfg_text)
-                if not ok:
-                    return self._send_text(400, f"netplan syntax error:\n{err}")
-                _mkdir(str(Path(pth).parent))
-                _write_text(pth, cfg_text if cfg_text.endswith("\n") else (cfg_text + "\n"))
-                rc, out, err = _run(["netplan", "apply"], timeout=20.0)
-                if rc != 0:
-                    return self._send_text(500, (err or out or "netplan apply failed").strip())
-            except Exception as e:
-                return self._send_text(500, f"netplan save/apply failed: {e}")
-            return self._send_json(200, {"ok": True, "path": pth})
+            task_id = self._start_async_op("netplan-save", lambda: self._op_netplan_save(body))
+            return self._send_json(202, {"ok": True, "task_id": task_id})
 
         if sp == "/api/netplan/validate":
             if self._auth_enabled and not self._session_user():
@@ -2353,6 +2642,34 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             res = self._sync_mtproto_derived_config(persist_outbound_mode=mode, apply_upstream=True)
             return self._send_json(200, res)
 
+        if sp == "/api/mtproto/install":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            action = str(body.get("action", "auto") or "auto").strip().lower()
+            if action not in ("auto", "install", "update"):
+                return self._send_text(400, "action must be auto|install|update")
+            installer = "/usr/local/sbin/awg-mtproto-install.sh"
+            if not Path(installer).exists():
+                return self._send_text(500, f"installer script is missing: {installer}")
+            st = self._mtproto_install_status()
+            if st.get("running"):
+                return self._send_json(200, {"ok": True, "started": False, "running": True, "status": st})
+            now = int(time.time())
+            self._set_mtproto_install_status(
+                running=True,
+                action=action,
+                started_at=now,
+                finished_at=0,
+                ok=None,
+                error="",
+                warnings=[],
+                phase="queued",
+            )
+            t = threading.Thread(target=self._run_mtproto_install_worker, args=(action,), daemon=True)
+            t.start()
+            return self._send_json(202, {"ok": True, "started": True, "running": True, "status": self._mtproto_install_status()})
+
         if sp == "/api/mtproto/config/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
@@ -2360,6 +2677,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cfg_text = str(body.get("config_text", ""))
             if not cfg_text.strip():
                 return self._send_text(400, "config_text is empty")
+            ok_toml, toml_err = _validate_toml_text(cfg_text)
+            if not ok_toml:
+                return self._send_text(400, f"invalid TOML: {toml_err}")
             cfg_path = self._mtproto_config_path()
             try:
                 _write_text(cfg_path, cfg_text)

@@ -11,6 +11,9 @@ DOCKER_MARK_TUNNEL_PRIO=${DOCKER_MARK_TUNNEL_PRIO:-71}
 DOCKER_SRC_PRIO_AFTER_MARK=${DOCKER_SRC_PRIO_AFTER_MARK:-73}
 DOCKER_FWMARK_DEC=${DOCKER_FWMARK_DEC:-30596}
 DOCKER_FWMARK_HEX=${DOCKER_FWMARK_HEX:-0x7784}
+MTPROTO_FWMARK_DEC=${MTPROTO_FWMARK_DEC:-200}
+MTPROTO_FWMARK_PRIO=${MTPROTO_FWMARK_PRIO:-200}
+MTPROTO_ROUTE_TABLE=${MTPROTO_ROUTE_TABLE:-200}
 
 log() { echo "[awg-webui-iface] $*"; }
 
@@ -289,6 +292,24 @@ teardown_docker_bridge_source_uplink() {
   done
 }
 
+setup_bridge_connected_routes_for_table() {
+  local table_id=$1 egress_dev=$2 ingress_dev=$3 cidr brdev
+  [[ -n "${table_id:-}" ]] || return 0
+  while IFS=$'\t' read -r cidr brdev; do
+    [[ -n "${cidr:-}" && -n "${brdev:-}" ]] || continue
+    ip -4 route replace "$cidr" dev "$brdev" table "$table_id"
+  done < <(detect_docker_bridge_subnet_lines "$egress_dev" "${ingress_dev:-$egress_dev}")
+}
+
+teardown_bridge_connected_routes_for_table() {
+  local table_id=$1 cidrs="$2" cidr
+  [[ -n "${table_id:-}" && -n "${cidrs:-}" ]] || return 0
+  for cidr in $cidrs; do
+    [[ -n "${cidr:-}" ]] || continue
+    ip -4 route del "$cidr" table "$table_id" 2>/dev/null || true
+  done
+}
+
 setup_to_main_bypass() {
   local src_ips="$1" cidrs="$2" prio_base="${3:-60}" src cidr prio
   [[ -n "$src_ips" && -n "$cidrs" ]] || return 0
@@ -316,6 +337,34 @@ teardown_to_main_bypass() {
       prio=$((prio + 1))
     done
   done
+}
+
+# mtproto.zig upstream=tunnel uses SO_MARK=200; route marked sockets via table 200.
+setup_mtproto_fwmark_policy() {
+  local mode=${1:-egress}
+  case "$mode" in
+    tunnel|egress|direct) ;;
+    *) mode="egress" ;;
+  esac
+  local awg_src=""
+  ip rule del fwmark "$MTPROTO_FWMARK_DEC" table "$MTPROTO_ROUTE_TABLE" priority "$MTPROTO_FWMARK_PRIO" 2>/dev/null || true
+  ip route del default table "$MTPROTO_ROUTE_TABLE" 2>/dev/null || true
+
+  if [[ "$mode" == "tunnel" ]] && ip link show dev awg-uplink 2>/dev/null | grep -q 'UP'; then
+    awg_src="$(first_ipv4_for_dev awg-uplink || true)"
+    if [[ -n "$awg_src" ]]; then
+      ip -4 route replace default dev awg-uplink src "$awg_src" table "$MTPROTO_ROUTE_TABLE"
+    else
+      ip -4 route replace default dev awg-uplink table "$MTPROTO_ROUTE_TABLE"
+    fi
+  else
+    if [[ -n "${EGRESS_GW:-}" ]]; then
+      ip -4 route replace default via "$EGRESS_GW" dev "$EGRESS_DEV" src "$EGRESS_IP" table "$MTPROTO_ROUTE_TABLE"
+    else
+      ip -4 route replace default dev "$EGRESS_DEV" src "$EGRESS_IP" table "$MTPROTO_ROUTE_TABLE"
+    fi
+  fi
+  ip rule add fwmark "$MTPROTO_FWMARK_DEC" table "$MTPROTO_ROUTE_TABLE" priority "$MTPROTO_FWMARK_PRIO"
 }
 
 # Ответы на published UDP WG: nft mark → lookup 202 → MASQUERADE с egress/ingress.
@@ -372,6 +421,7 @@ save_state() {
     printf 'RP_RESTORE_INGRESS_VAL=%q\n' "${RP_RESTORE_INGRESS_VAL:-}"
     printf 'RP_INGRESS_RESTORE_DEV=%q\n' "${RP_INGRESS_RESTORE_DEV:-}"
     printf 'INGRESS_DOCKER_SNAT_CIDRS=%q\n' "${INGRESS_DOCKER_SNAT_CIDRS:-}"
+    printf 'INGRESS_LOCAL_CIDRS=%q\n' "${INGRESS_LOCAL_CIDRS:-}"
     printf 'DOCKER_TUNNEL_MARK_DEC=%q\n' "${DOCKER_TUNNEL_MARK_DEC:-}"
     printf 'DOCKER_TUNNEL_MARK_PRIO=%q\n' "${DOCKER_TUNNEL_MARK_PRIO:-}"
     printf 'DOCKER_TUNNEL_NFT_ACTIVE=%q\n' "${DOCKER_TUNNEL_NFT_ACTIVE:-0}"
@@ -400,9 +450,13 @@ remove_rules() {
   local dock_prio="${DOCKER_SRC_PRIO_START:-72}"
   local docker_policy_tab="${DOCKER_POLICY_RULE_TABLE:-$etab}"
   local ing_snat_cidrs="${INGRESS_DOCKER_SNAT_CIDRS:-}"
+  local ingress_local_cidrs="${INGRESS_LOCAL_CIDRS:-}"
   local tun_mark_prio="${DOCKER_TUNNEL_MARK_PRIO:-}"
   local tun_mark_dec="${DOCKER_TUNNEL_MARK_DEC:-}"
   local tun_nft="${DOCKER_TUNNEL_NFT_ACTIVE:-0}"
+  local mt_mark_dec="${MTPROTO_FWMARK_DEC:-200}"
+  local mt_mark_prio="${MTPROTO_FWMARK_PRIO:-200}"
+  local mt_table="${MTPROTO_ROUTE_TABLE:-200}"
   rp_filter_restore_saved "$edev" "${RP_RESTORE_EGRESS_VAL:-}" "${RP_INGRESS_RESTORE_DEV:-}" "${RP_RESTORE_INGRESS_VAL:-}"
   if [[ "${tun_nft}" == "1" && -n "${tun_mark_prio}" && -n "${tun_mark_dec}" ]]; then
     ip rule del fwmark "$tun_mark_dec" table "${EGRESS_TABLE:-202}" priority "$tun_mark_prio" 2>/dev/null || true
@@ -410,8 +464,11 @@ remove_rules() {
   nft_pubudp_teardown
   teardown_ingress_docker_snat "${INGRESS_IP:-}" "$ing_snat_cidrs"
   teardown_docker_bridge_source_uplink "$etab" "$docker_policy_tab" "$dock_prio" "$dock_cidrs" "$ttab"
+  teardown_bridge_connected_routes_for_table "$itab" "$ingress_local_cidrs"
   [[ -n $idev ]] && ip rule del from "$idev/32" table "$itab" priority "$iprio" 2>/dev/null || true
   [[ -n $eip ]] && ip rule del from "$eip/32" table "$etab" priority "$eprio" 2>/dev/null || true
+  ip rule del fwmark "$mt_mark_dec" table "$mt_table" priority "$mt_mark_prio" 2>/dev/null || true
+  ip route del default table "$mt_table" 2>/dev/null || true
   teardown_to_main_bypass "$bypass_srcs" "$bypass_cidrs" "$bypass_prio_base"
   ip rule del table "$ttab" priority "$tprio" 2>/dev/null || true
   ip route del default table "$itab" 2>/dev/null || true
@@ -467,6 +524,7 @@ apply_cfg() {
   BYPASS_SRCS=""
   BYPASS_PRIO_BASE=60
   INGRESS_DOCKER_SNAT_CIDRS=""
+  INGRESS_LOCAL_CIDRS=""
   DOCKER_POLICY_RULE_TABLE=""
 
   if [[ "$ROUTE_MODE" == "tunnel" ]]; then
@@ -554,6 +612,10 @@ apply_cfg() {
     DOCKER_SRC_CIDRS_ORDERED=""
     DOCKER_SRC_PRIO_START="${DOCKER_SRC_PRIO_AFTER_MARK}"
     setup_docker_bridge_source_uplink "$EGRESS_TABLE" "$DOCKER_SRC_PRIO_START" "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}" "$TUN_TABLE" "$DOCKER_POLICY_RULE_TABLE"
+    # Replies from source INGRESS_IP use table 201; include Docker/Amnezia bridge routes there too.
+    if [[ "${INGRESS_ENABLED:-0}" == "1" && -n "${INGRESS_IP:-}" ]]; then
+      setup_bridge_connected_routes_for_table "${INGRESS_TABLE:-201}" "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}"
+    fi
     ip -4 rule add table "$TUN_TABLE" priority "$TUN_RULE_PRIO"
   else
     # Egress mode: whole system default -> egress.
@@ -576,6 +638,8 @@ apply_cfg() {
       ip -4 route replace default dev "${INGRESS_DEV:-$EGRESS_DEV}" src "$INGRESS_IP" table "$itab"
     fi
     [[ -n $ilink ]] && ip -4 route replace "$ilink" dev "${INGRESS_DEV:-$EGRESS_DEV}" table "$itab"
+    INGRESS_LOCAL_CIDRS="$(detect_to_main_cidrs "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}")"
+    setup_bridge_connected_routes_for_table "$itab" "$EGRESS_DEV" "${INGRESS_DEV:-$EGRESS_DEV}"
     ip -4 rule del from "$INGRESS_IP/32" table "$itab" priority "$iprio" 2>/dev/null || true
     ip -4 rule add from "$INGRESS_IP/32" table "$itab" priority "$iprio"
     if [[ "$ROUTE_MODE" == "tunnel" ]]; then
@@ -600,6 +664,8 @@ apply_cfg() {
   fi
   # Сохраняем восстановление после stop/remove: канонический default по eth, не «случайная» строка после туннеля.
   old_default="$(canonical_egress_default_line)"
+  local mtproto_mode="${MTPROTO_OUTBOUND_MODE:-$ROUTE_MODE}"
+  setup_mtproto_fwmark_policy "$mtproto_mode"
   save_state "$old_default"
 
   log "applied: mode=${ROUTE_MODE}, egress=${EGRESS_DEV}/${EGRESS_IP}, ingress_enabled=${INGRESS_ENABLED:-0}"

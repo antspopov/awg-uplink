@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>awg-uplink — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260507-3" />
+    <link rel="stylesheet" href="./styles.css?v=20260508-1" />
   </head>
   <body>
     <div class="app">
@@ -433,9 +433,12 @@
                 <span class="status-text">health: неизвестно</span>
               </div>
             </div>
-            <div class="hint">Пользователи, ссылки, masking health и редактирование config.toml.</div>
+            <div class="users-head-right">
+              <button class="btn" id="mtpInstallBtn" type="button">Установить</button>
+            </div>
           </div>
 
+          <div id="mtprotoPanelRoot">
           <div class="grid mtproto-grid">
             <div class="card">
               <div class="card-head">
@@ -531,16 +534,8 @@
                 </div>
               </div>
               <div class="users-meta" id="mtpOutboundMeta"></div>
-              <div class="help">
-                <code>direct</code> — в конфиге <code>[upstream] type = "direct"</code>. <code>Egress</code> и
-                <code>Тунельный интерфейс</code> — <code>type = "tunnel"</code> с <code>interface</code> из выбранного режима (имя
-                egress или ingress из «Настройка интерфейсов», для тунеля при пустом ingress — <code>awg-uplink</code>). При смене
-                списка конфиг обновляется и прокси перезапускается; в <code>[server]</code> выставляются <code>public_ip</code>
-                (ingress или egress при совпадении интерфейсов) и <code>middle_proxy_nat_ip</code> (IPv4 egress). Полная правка
-                <code>config.toml</code> тоже подтягивает эти поля без перезаписи <code>[upstream]</code>. Сохранение интерфейсов в
-                другой карточке синхронизирует MTProto автоматически.
-              </div>
             </div>
+          </div>
           </div>
         </section>
       </main>
@@ -672,8 +667,51 @@
       </div>
     </div>
 
+    <div class="modal-overlay hidden" id="mtpInstallWarnOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mtpInstallWarnTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="mtpInstallWarnTitle">Перед установкой/обновлением MTProto</div>
+          <button class="icon-btn" id="mtpInstallWarnCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="help">
+            В некоторых сетях РФ установка MTProto может завершаться ошибкой из-за ограничений доступа к внешним ресурсам.
+          </div>
+          <div class="help">
+            Рекомендуется заранее настроить туннельный интерфейс с выходом через другую страну и временно переключить
+            маршрут по умолчанию в режим <code>В тунельный интерфейс</code>.
+          </div>
+          <div class="help">
+            После успешной установки можно вернуть прежний режим роутинга.
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="mtpInstallWarnContinueBtn" type="button">Продолжить установку</button>
+          <button class="btn" id="mtpInstallWarnCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="mtpDeleteUserConfirmOverlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mtpDeleteUserConfirmTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="mtpDeleteUserConfirmTitle">Удаление пользователя MTProto</div>
+          <button class="icon-btn" id="mtpDeleteUserConfirmCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="help" id="mtpDeleteUserConfirmText">
+            Вы действительно хотите удалить пользователя?
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn--primary" id="mtpDeleteUserConfirmOkBtn" type="button">Удалить</button>
+          <button class="btn" id="mtpDeleteUserConfirmCancelBtn" type="button">Отмена</button>
+        </div>
+      </div>
+    </div>
+
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260507-5"></script>
+    <script src="./app.js?v=20260508-5"></script>
   </body>
 </html>
 

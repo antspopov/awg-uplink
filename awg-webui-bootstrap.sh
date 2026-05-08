@@ -45,6 +45,7 @@ USE_LETSENCRYPT=0
 SELF_SIGNED_CERT_DIR="/etc/ssl/awg-uplink-webui"
 NGINX_SITE_PATH="/etc/nginx/sites-available/awg-uplink-webui.conf"
 NGINX_SITE_LINK="/etc/nginx/sites-enabled/awg-uplink-webui.conf"
+WEBUI_MASK_PORT="${AWG_UI_MASK_PORT:-5000}"
 EXISTING_LE_DOMAIN=""
 LE_RENEW_SELECTED=1
 
@@ -83,7 +84,7 @@ collect_interface_urls() {
     [[ "$iface" == amn* ]] && continue
     [[ "$iface" == awg* ]] && continue
     [[ "$iface" == veth* ]] && continue
-    urls+=("https://$ip")
+    urls+=("https://$ip:${WEBUI_MASK_PORT}")
   done < <(ip -o -4 addr show scope global | awk '{split($4,a,"/"); print $2, a[1]}')
   if [[ ${#urls[@]} -eq 0 ]]; then
     return 0
@@ -193,13 +194,13 @@ server {
     }
 
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://\$host:${WEBUI_MASK_PORT}\$request_uri;
     }
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen ${WEBUI_MASK_PORT} ssl;
+    listen [::]:${WEBUI_MASK_PORT} ssl;
     server_name $WEBUI_DOMAIN;
 
     ssl_certificate $cert_path;
@@ -210,6 +211,10 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        send_timeout 300s;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -296,7 +301,7 @@ print_final_summary() {
   echo "${C_CYAN}${C_BOLD}================ AWG Web UI Setup Summary ================${C_RESET}"
   echo "${C_YELLOW}HTTPS mode:${C_RESET} $( [[ $USE_LETSENCRYPT -eq 1 ]] && echo "Let's Encrypt" || echo "Self-signed certificate" )"
   if [[ $USE_LETSENCRYPT -eq 1 ]]; then
-    echo "${C_YELLOW}${C_BOLD}Primary URL:${C_RESET} ${C_GREEN}${C_BOLD}https://$WEBUI_DOMAIN${C_RESET}"
+    echo "${C_YELLOW}${C_BOLD}Primary URL:${C_RESET} ${C_GREEN}${C_BOLD}https://$WEBUI_DOMAIN:${WEBUI_MASK_PORT}${C_RESET}"
   fi
   echo "${C_YELLOW}${C_BOLD}Login:${C_RESET} ${C_CYAN}${C_BOLD}$WEBUI_USER${C_RESET}"
   echo "${C_YELLOW}${C_BOLD}Password:${C_RESET} ${C_GREEN}${C_BOLD}$WEBUI_PASS${C_RESET}"
@@ -427,7 +432,7 @@ dedupe_env_file() {
 
 usage() {
   cat <<EOF
-Usage: $0 [--no-start]
+Usage: $0 [--no-start] [--update-files-only]
 
 Installs AWG Web UI runtime:
   - app files to $APP_DIR
@@ -440,10 +445,12 @@ EOF
 }
 
 NO_START=0
+UPDATE_FILES_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --no-start) NO_START=1 ;;
+    --update-files-only) UPDATE_FILES_ONLY=1 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -466,6 +473,7 @@ done
 [[ -f "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" ]] || die "missing amnezia dns watch script in lib/"
 [[ -f "$LIB_SRC/awg-uplink-dns-transport-lock.py" ]] || die "missing dns transport lock script in lib/"
 [[ -f "$LIB_SRC/awg-uplink-firewall-apply.py" ]] || die "missing firewall apply script in lib/"
+[[ -f "$LIB_SRC/awg-mtproto-install.sh" ]] || die "missing mtproto install script in lib/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" ]] || die "missing dns refresh unit in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" ]] || die "missing dns refresh timer in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" ]] || die "missing amnezia dns watch unit in systemd/"
@@ -473,16 +481,20 @@ done
 [[ -f "$SYSTEMD_SRC/awg-uplink-firewall.service" ]] || die "missing firewall unit in systemd/"
 [[ -f "$SYSTEMD_SRC/dnscrypt-proxy.service" ]] || die "missing dnscrypt-proxy systemd unit (awg-uplink override)"
 
-prompt_install_profile
-prompt_webui_settings
-
-if command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot)..."
-  DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx >/dev/null
+if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
+  prompt_install_profile
+  prompt_webui_settings
 fi
 
+if [[ $UPDATE_FILES_ONLY -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
+  DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
+fi
+
+if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
 ensure_amneziawg
+fi
 
 log "Creating directories..."
 install -d -m 755 "$APP_DIR"
@@ -508,6 +520,7 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" "$APP_ROOT/lib/awg-uplink-dn
 install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" "$APP_ROOT/lib/awg-uplink-amnezia-dns-watch.py"
 install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" "$APP_ROOT/lib/awg-uplink-dns-transport-lock.py"
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" "$APP_ROOT/lib/awg-uplink-firewall-apply.py"
+install -m 755 "$LIB_SRC/awg-mtproto-install.sh" "$APP_ROOT/lib/awg-mtproto-install.sh"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" "$APP_ROOT/systemd/awg-uplink-dns-refresh.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "$APP_ROOT/systemd/awg-uplink-dns-refresh.timer"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "$APP_ROOT/systemd/awg-uplink-amnezia-dns-watch.service"
@@ -523,6 +536,7 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" /usr/local/sbin/awg-uplink-d
 install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" /usr/local/sbin/awg-uplink-amnezia-dns-watch.py
 install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" /usr/local/sbin/awg-uplink-dns-transport-lock.py
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" /usr/local/sbin/awg-uplink-firewall-apply.py
+install -m 755 "$LIB_SRC/awg-mtproto-install.sh" /usr/local/sbin/awg-mtproto-install.sh
 
 log "Installing systemd units..."
 install -m 644 "$SYSTEMD_SRC/$WEBUI_SERVICE" "/etc/systemd/system/$WEBUI_SERVICE"
@@ -540,6 +554,16 @@ install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" "/etc/system
 install -m 644 "$SYSTEMD_SRC/awg-uplink-firewall.service" "/etc/systemd/system/awg-uplink-firewall.service"
 install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscrypt-proxy.service"
 
+if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
+  log "Update-only mode: skip configuration changes and prompts."
+  systemctl daemon-reload
+  log "Restarting web UI service..."
+  systemctl restart "$WEBUI_SERVICE"
+  systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true
+  log "Update-only completed."
+  exit 0
+fi
+
 systemctl disable dnscrypt-proxy.socket >/dev/null 2>&1 || true
 systemctl stop dnscrypt-proxy.socket >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/dnscrypt-proxy.socket.d/awg-uplink.conf
@@ -554,6 +578,9 @@ AWG_WEBUI_NO_AUTH=0
 AWG_UI_USER=admin
 AWG_UI_PASS=change-me
 AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+AWG_UI_DOMAIN=wb.ru
+AWG_UI_TLS_MODE=self-signed
+AWG_UI_MASK_PORT=5000
 EOF
   chmod 600 "$CFG_DIR/webui.env"
 fi
@@ -603,7 +630,7 @@ if [[ ! -f "$CFG_DIR/dns.json" ]]; then
   "domains_list_updated_at": null,
   "firewall": {
     "egress_tcp_ports": [22],
-    "ingress_tcp_ports": [22, 80, 443]
+    "ingress_tcp_ports": [22, 80, 443, 5000]
   },
   "amnezia_dns_watch_enabled": true,
   "amnezia_dns_container": "amnezia-dns",
@@ -656,6 +683,9 @@ set_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_PORT" "8080"
 set_env_key "$CFG_DIR/webui.env" "AWG_WEBUI_NO_AUTH" "0"
 set_env_key "$CFG_DIR/webui.env" "AWG_UI_USER" "$WEBUI_USER"
 set_env_key "$CFG_DIR/webui.env" "AWG_UI_PASS" "$WEBUI_PASS"
+set_env_key "$CFG_DIR/webui.env" "AWG_UI_DOMAIN" "$WEBUI_DOMAIN"
+set_env_key "$CFG_DIR/webui.env" "AWG_UI_TLS_MODE" "$( [[ $USE_LETSENCRYPT -eq 1 ]] && echo "letsencrypt" || echo "self-signed" )"
+set_env_key "$CFG_DIR/webui.env" "AWG_UI_MASK_PORT" "$WEBUI_MASK_PORT"
 dedupe_env_file "$CFG_DIR/webui.env"
 chmod 600 "$CFG_DIR/webui.env"
 

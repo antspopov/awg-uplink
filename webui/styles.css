@@ -353,6 +353,12 @@ body::before {
   margin-top: 14px;
 }
 
+#mtprotoPanelRoot.mtproto-panel--locked {
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+}
+
 .mtproto-config-card .mtp-config-extras {
   margin-top: 12px;
   padding-top: 12px;
@@ -1077,6 +1083,10 @@ select:disabled option {
   color: rgba(255, 255, 255, 0.68);
 }
 
+#mtpOutboundMeta {
+  margin-top: 10px;
+}
+
 .routing-modes {
   display: flex;
   gap: 8px;
@@ -1216,6 +1226,50 @@ select:disabled option {
   backdrop-filter: blur(4px);
 }
 
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 10, 22, 0.6);
+  backdrop-filter: blur(3px);
+}
+
+.busy-overlay-card {
+  min-width: 210px;
+  max-width: min(92vw, 420px);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(10, 14, 30, 0.94);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.busy-spinner {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent);
+  animation: busy-spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+
+.busy-text {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+@keyframes busy-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .modal {
   width: min(820px, 100%);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -1287,6 +1341,39 @@ textarea {
   flex-direction: column;
   gap: 8px;
   pointer-events: none;
+}
+
+.reconnect-notice {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 1101;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 300px;
+  max-width: min(92vw, 480px);
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(39, 28, 6, 0.96);
+  color: #fde68a;
+  box-shadow: var(--shadow);
+}
+
+.reconnect-notice__spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(253, 230, 138, 0.4);
+  border-top-color: #f59e0b;
+  animation: busy-spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+
+.reconnect-notice__text {
+  font-size: 12px;
+  line-height: 1.25;
 }
 
 .toast {
