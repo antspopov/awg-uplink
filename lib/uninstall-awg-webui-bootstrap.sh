@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Удаляет всё, что ставит awg-webui-bootstrap.sh (текущая ветка main): юниты, конфиги,
 # /opt/awg-uplink, MTProto в /opt, nginx-сайт Web UI, самоподписанные сертификаты, сниппеты dnsmasq/resolved.
-# Затем снимает пакеты, которые bootstrap ставит через apt (включая amneziawg), и при необходимости
+# Затем снимает пакеты, которые bootstrap ставит через apt (amneziawg, amneziawg-tools — отдельный .deb в PPA),
+# и при необходимости
 # удаляет DKMS-модуль amneziawg и бинарники awg/awg-quick из исходной сборки.
 # Не трогает артефакты ветки minimal (split, policy-hook).
 #
