@@ -335,6 +335,18 @@ awg_quick_present() {
   command -v awg-quick >/dev/null 2>&1
 }
 
+# awg-quick из amneziawg-tools может остаться без пакета amneziawg/DKMS — тогда apt-установку не пропускаем.
+amneziawg_stack_ready() {
+  awg_quick_present || return 1
+  if dpkg-query -W -f='${Status}' amneziawg 2>/dev/null | grep -q 'install ok installed'; then
+    return 0
+  fi
+  if dkms status 2>/dev/null | grep -q '^amneziawg/'; then
+    return 0
+  fi
+  return 1
+}
+
 add_amnezia_apt_debian() {
   apt-get install -y gnupg2 ca-certificates curl software-properties-common
   apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828 2>/dev/null \
@@ -352,9 +364,12 @@ add_amnezia_apt_ubuntu() {
 }
 
 ensure_amneziawg() {
-  if awg_quick_present; then
-    log "awg-quick already present."
+  if amneziawg_stack_ready; then
+    log "AmneziaWG (awg-quick и модуль/DKMS) уже в порядке — шаг пропускается."
     return 0
+  fi
+  if awg_quick_present; then
+    log "awg-quick в PATH, но стек AmneziaWG неполный — доустановка через apt/источник…"
   fi
   [[ -f /etc/os-release ]] || die "missing /etc/os-release"
   # shellcheck disable=SC1091

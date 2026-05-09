@@ -238,6 +238,7 @@ if command -v apt-get >/dev/null 2>&1; then
 	# Точное совпадение с пакетами из awg-webui-bootstrap.sh (ensure_amneziawg / основной apt-get install).
 	PKGS=(
 		amneziawg
+		amneziawg-tools
 		python3-certbot-nginx
 		certbot
 		python3
