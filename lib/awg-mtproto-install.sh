@@ -293,6 +293,9 @@ restart_mtproto_service() {
   # Full restart is required after install:
   # - systemd capability drop-ins (CAP_NET_ADMIN/SO_MARK) are applied only on restart
   # - mtbuddy stages can rewrite config/runtime bits that are not safely hot-reloaded
+  log "Enabling mtproto-proxy and nfqws for boot (mtbuddy does not always enable units)..."
+  systemctl enable mtproto-proxy.service >/dev/null 2>&1 || true
+  systemctl enable "${NFQWS_SERVICE}.service" >/dev/null 2>&1 || true
   log "Restarting mtproto-proxy to apply install-time changes..."
   systemctl restart mtproto-proxy
 }
