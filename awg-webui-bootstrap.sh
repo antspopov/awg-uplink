@@ -335,16 +335,12 @@ awg_quick_present() {
   command -v awg-quick >/dev/null 2>&1
 }
 
-# awg-quick из amneziawg-tools может остаться без пакета amneziawg/DKMS — тогда apt-установку не пропускаем.
+# Не полагаемся на dpkg/DKMS в одиночку: в dkms status бывает «added/built» без модуля для текущего ядра,
+# а awg-quick может остаться от amneziawg-tools. «Готово» только если утилита есть и ядро видит модуль.
 amneziawg_stack_ready() {
   awg_quick_present || return 1
-  if dpkg-query -W -f='${Status}' amneziawg 2>/dev/null | grep -q 'install ok installed'; then
-    return 0
-  fi
-  if dkms status 2>/dev/null | grep -q '^amneziawg/'; then
-    return 0
-  fi
-  return 1
+  modprobe -n amneziawg &>/dev/null || return 1
+  return 0
 }
 
 add_amnezia_apt_debian() {
