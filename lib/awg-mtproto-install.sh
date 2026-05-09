@@ -290,12 +290,11 @@ enable_mtproto_recovery() {
 }
 
 restart_mtproto_service() {
-  if systemctl reload mtproto-proxy >/dev/null 2>&1; then
-    log "mtproto-proxy reloaded."
-  else
-    log "mtproto-proxy reload unsupported/failed; restarting."
-    systemctl restart mtproto-proxy
-  fi
+  # Full restart is required after install:
+  # - systemd capability drop-ins (CAP_NET_ADMIN/SO_MARK) are applied only on restart
+  # - mtbuddy stages can rewrite config/runtime bits that are not safely hot-reloaded
+  log "Restarting mtproto-proxy to apply install-time changes..."
+  systemctl restart mtproto-proxy
 }
 
 main() {
