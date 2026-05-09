@@ -622,7 +622,7 @@ def _amnezia_stack_probe_cached(probe_fn) -> bool:
 
 
 class WebUIHandler(SimpleHTTPRequestHandler):
-    server_version = "awg-uplink-webui/0.2"
+    server_version = "AWG-Split-Gate-webui/0.2"
 
     def __init__(self, *args, directory=None, username="", password="", **kwargs):
         self._username = username
@@ -2970,7 +2970,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="awg-uplink web UI (static) with digest-style login")
+    parser = argparse.ArgumentParser(description="AWG Split Gate web UI (static) with digest-style login")
     parser.add_argument("--host", default=os.environ.get("AWG_WEBUI_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("AWG_WEBUI_PORT", "8080")))
     parser.add_argument(
@@ -2994,7 +2994,7 @@ def main():
         user = os.environ.get("AWG_UI_USER", "debug")
         pwd = os.environ.get("AWG_UI_PASS", "debug")
     base_path = _normalize_base_path(args.base_path)
-    realm = "awg-uplink webui"
+    realm = "AWG Split Gate webui"
     secret = _sha256_hex(f"{user}:{realm}:{pwd}")
 
     directory = str(Path(__file__).parent.resolve())

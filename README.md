@@ -1,12 +1,14 @@
-# awg-uplink
+# AWG Split Gate
 
 [English](#english-summary) · **Русский**
+
+*Человекочитаемое имя продукта. Репозиторий на GitHub, каталоги установки, имена systemd-юнитов и сетевой интерфейс туннеля по-прежнему используют технический префикс **`awg-uplink`** — это не ошибка.*
 
 ---
 
 ## Краткое описание
 
-**awg-uplink** — это набор сценариев и **веб-интерфейс управления** для сервера на Linux, который объединяет в одном месте: **раздельный egress/ingress**, **туннель AmneziaWG** (`awg-uplink`), **политику маршрутизации** (включая georouting по IP и по доменам), **DNS** (dnsmasq, dnscrypt-proxy, интеграция с AmneziaDNS), **nftables-брандмауэр**, а также **MTProto-прокси** (установка и обслуживание через Web UI и `mtbuddy`).
+**AWG Split Gate** — это набор сценариев и **веб-интерфейс управления** для сервера на Linux, который объединяет в одном месте: **раздельный egress/ingress**, **туннель AmneziaWG** (интерфейс `awg-uplink`), **политику маршрутизации** (включая georouting по IP и по доменам), **DNS** (dnsmasq, dnscrypt-proxy, интеграция с AmneziaDNS), **nftables-брандмауэр**, а также **MTProto-прокси** (установка и обслуживание через Web UI и `mtbuddy`).
 
 Проект рассчитан на **чистую установку под root** через скрипт **`awg-webui-bootstrap.sh`**: он копирует файлы в `/opt/awg-uplink/webui`, поднимает **nginx** с HTTPS (Let's Encrypt или самоподписанный сертификат), настраивает **systemd**-юниты и создаёт конфигурацию в **`/etc/awg-uplink-webui/`**. Дальнейшая настройка выполняется **из браузера**: мониторинг, интерфейсы, туннель, роутинг, DNS, MTProto — без ручного редактирования десятка разрозненных конфигов (хотя продвинутые правки по-прежнему возможны).
 
@@ -186,7 +188,7 @@ sudo ./awg-webui-bootstrap.sh --update-files-only
 
 ## English summary
 
-**awg-uplink** bundles routing, AmneziaWG tunneling, optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`), and detailed panel behavior.
+**AWG Split Gate** bundles routing, AmneziaWG tunneling (interface `awg-uplink`), optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`), and detailed panel behavior.
 
 ---
 

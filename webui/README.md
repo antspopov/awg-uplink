@@ -1,6 +1,6 @@
-# awg-uplink web UI (visual-only, no script calls yet)
+# AWG Split Gate — web UI
 
-Это прототип веб-интерфейса управления для `awg-uplink`.
+Веб-интерфейс управления шлюзом (репозиторий и пути установки по-прежнему `awg-uplink`).
 
 Сейчас:
 - Есть **авторизация**: отдельная страница входа + digest (challenge-response) и cookie-сессия.

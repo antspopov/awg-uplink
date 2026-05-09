@@ -384,29 +384,29 @@ function initImportModal(state) {
         toast("Конфиг не задан.", "error", 2200);
         return;
       }
-      setTunnelStatus("dot--warn", "awg-uplink: импорт конфигурации");
+      setTunnelStatus("dot--warn", "Туннель awg-uplink: импорт конфигурации");
       await withBusyOverlay("Импортируем конфигурацию туннеля…", async () => {
         await postJson("/api/tunnel/validate", { config_text: cfgText });
         await postJson("/api/tunnel/import", { config_text: cfgText });
       });
-      toast("Конфиг awg-uplink импортирован.", "ok");
+      toast("Конфиг туннеля awg-uplink импортирован.", "ok");
       await refreshTunnelStatus(state);
     } catch (e) {
-      setTunnelStatus("dot--bad", "awg-uplink: ошибка импорта");
+      setTunnelStatus("dot--bad", "Туннель awg-uplink: ошибка импорта");
       toast(`Ошибка импорта: ${e?.message || "unknown"}`, "error", 3000);
     }
   });
 
   restartBtn.addEventListener("click", async () => {
     try {
-      setTunnelStatus("dot--warn", "awg-uplink: перезапуск");
+      setTunnelStatus("dot--warn", "Туннель awg-uplink: перезапуск");
       await withBusyOverlay("Перезапускаем туннель…", async () => {
         await postJson("/api/tunnel/restart", {});
       });
-      toast("awg-uplink перезапущен.", "ok");
+      toast("Туннель awg-uplink перезапущен.", "ok");
       await refreshTunnelStatus(state);
     } catch (e) {
-      setTunnelStatus("dot--bad", "awg-uplink: ошибка перезапуска");
+      setTunnelStatus("dot--bad", "Туннель awg-uplink: ошибка перезапуска");
       toast(`Ошибка перезапуска: ${e?.message || "unknown"}`, "error", 2800);
     }
   });
@@ -470,15 +470,16 @@ async function refreshTunnelStatus(state = null) {
     const up = Boolean(st.exists && st.state === "UP");
     if (state) state.tunnelUp = up;
     setRoutingAvailability(up);
-    if (!st.exists) return setTunnelStatus("dot--bad", st.configured ? "awg-uplink: DOWN" : "awg-uplink: не настроен");
+    if (!st.exists)
+      return setTunnelStatus("dot--bad", st.configured ? "Туннель awg-uplink: DOWN" : "Туннель awg-uplink: не настроен");
     const op = st.operstate && st.operstate !== "UNKNOWN" ? st.operstate : "";
-    if (st.state === "UP") return setTunnelStatus("dot--ok", `awg-uplink: UP${op ? ` (${op})` : ""}`);
+    if (st.state === "UP") return setTunnelStatus("dot--ok", `Туннель awg-uplink: UP${op ? ` (${op})` : ""}`);
     const base = st.state || "UNKNOWN";
-    return setTunnelStatus("dot--warn", `awg-uplink: ${base}${op ? ` (${op})` : ""}`);
+    return setTunnelStatus("dot--warn", `Туннель awg-uplink: ${base}${op ? ` (${op})` : ""}`);
   } catch {
     if (state) state.tunnelUp = false;
     setRoutingAvailability(false);
-    setTunnelStatus("dot--unknown", "awg-uplink: ошибка статуса");
+    setTunnelStatus("dot--unknown", "Туннель awg-uplink: ошибка статуса");
   }
 }
 
@@ -804,7 +805,7 @@ async function refreshMtprotoState(state) {
       parts.push(`egress ${up.egress_dev || "—"} · ingress ${up.ingress_dev || "—"}`);
       const cfgIf = String(up.tunnel_interface_config || "").trim();
       if (cfgIf) parts.push(`[upstream.tunnel] ${cfgIf}`);
-      if (up.tunnel_iface_up === false) parts.push("awg-uplink не UP");
+      if (up.tunnel_iface_up === false) parts.push("туннель awg-uplink не UP");
       om.textContent = parts.join(" · ");
     }
 
