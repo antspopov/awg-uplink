@@ -79,8 +79,22 @@ sudo ./awg-webui-bootstrap.sh
 |--------|------------|
 | `--no-start` | установить файлы и конфиги, но не перезапускать веб-сервис в конце |
 | `--update-files-only` | только обновить файлы из репозитория и перезапустить `awg-uplink-webui`, без повторного мастера |
+| `--uninstall` | полная деинсталляция Web UI / MTProto / туннеля и пакетов из списка установки (в т.ч. **amneziawg**); см. раздел ниже |
 
 Справка: `sudo ./awg-webui-bootstrap.sh --help`
+
+### Полная деинсталляция (`--uninstall`)
+
+Из каталога репозитория:
+
+```bash
+cd /path/to/awg-uplink
+sudo ./awg-webui-bootstrap.sh --uninstall
+```
+
+Скрипт выведет предупреждение и попросит ввести **`DEINSTALL-AWG-WEBUI-BOOTSTRAP`**. Затем выполняется тот же сценарий, что и **`scripts/remove-legacy-minimal-awg-uplink.sh`** (бэкапы в подкаталоге `awg-webui-uninstall-*` внутри репозитория), удаляются drop-in **systemd-resolved** и сниппет **dnsmasq** из bootstrap, каталог **`/var/lib/awg-uplink`**, модули **dkms** `amneziawg`, списки репозитория Amnezia (если были), затем **`apt-get remove --purge`** по пакетам, которые ставит обычная установка (nginx, certbot, dnsmasq, nftables, **amneziawg** и др.; часть может отсутствовать). В конце — **`apt-get autoremove`**.
+
+**Обязательно `sudo reboot`** после успешного завершения (очистка **nft** и маршрутов). Несовместимо с **`--no-start`** и **`--update-files-only`**.
 
 ---
 
@@ -128,7 +142,7 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 - убирает **nginx**-сайты и сниппеты проекта (в т.ч. **awg-uplink-webui**), при необходимости включает дефолтный **`sites-enabled/default`**; удаляет **`/etc/ssl/awg-uplink-webui`**;
 - при наличии стека Web UI: бэкап и удаление **`/etc/awg-uplink-webui`**, **`/var/lib/awg-uplink-webui`**, **`/opt/awg-uplink`**, отключение связанных **systemd**-юнитов.
 
-Пакет **amneziawg** скрипт **не** удаляет (оставьте `apt` при необходимости).
+Скрипт **`remove-legacy-minimal-awg-uplink.sh` сам по себе пакеты не снимает** — для полного удаления вместе с **amneziawg** и зависимостями apt используйте **`sudo ./awg-webui-bootstrap.sh --uninstall`** (см. выше).
 
 **После скрипта обязательно выполните полную перезагрузку сервера:** `sudo reboot` — так надёжнее сбросить **nftables**-таблицы и маршрутизацию, оставшиеся от старых правил. Уже **после reboot** запускайте `sudo ./awg-webui-bootstrap.sh`.
 
@@ -216,7 +230,7 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 
 ## English summary
 
-**AWG Split Gate** bundles routing, AmneziaWG tunneling (interface `awg-uplink`), optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`), and detailed panel behavior.
+**AWG Split Gate** bundles routing, AmneziaWG tunneling (interface `awg-uplink`), optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). Full removal (services, files, and packages installed by the bootstrap, including **amneziawg**): **`sudo ./awg-webui-bootstrap.sh --uninstall`** (confirmation phrase **`DEINSTALL-AWG-WEBUI-BOOTSTRAP`**, then **reboot**). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`, `--uninstall`), and detailed panel behavior.
 
 ---
 

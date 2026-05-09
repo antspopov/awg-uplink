@@ -73,10 +73,14 @@ else
 	echo "По умолчанию: после бэкапа файл ${WG_CONF} удаляется с диска." >&2
 fi
 
-read -r -p "Введите точную фразу DELETE-MINIMAL-AWG-UPLINK для продолжения: " confirm
-if [[ "$confirm" != "DELETE-MINIMAL-AWG-UPLINK" ]]; then
-	echo "Отменено." >&2
-	exit 1
+if [[ "${AWG_UNINSTALL_NONINTERACTIVE:-}" == 1 ]]; then
+	echo "[remove-legacy-minimal] AWG_UNINSTALL_NONINTERACTIVE=1 — пропуск ввода DELETE-MINIMAL-AWG-UPLINK (вызов из awg-webui-bootstrap.sh --uninstall)." >&2
+else
+	read -r -p "Введите точную фразу DELETE-MINIMAL-AWG-UPLINK для продолжения: " confirm
+	if [[ "$confirm" != "DELETE-MINIMAL-AWG-UPLINK" ]]; then
+		echo "Отменено." >&2
+		exit 1
+	fi
 fi
 
 mkdir -p -- "$BACKUP_DIR"
