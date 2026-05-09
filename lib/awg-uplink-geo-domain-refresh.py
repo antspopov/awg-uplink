@@ -16,6 +16,8 @@ CFG_DIR = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui"))
 CIF_JSON = CFG_DIR / "interfaces.json"
 GEO_JSON = CFG_DIR / "georouting.json"
 CACHE_DIR = Path("/var/lib/awg-uplink/geo-domain")
+# JSON list of nft interval strings; used only when ip awg_geo_domain is created empty (e.g. after reboot).
+GEO_DOMAIN_SET_SNAPSHOT = CACHE_DIR / "geo_domain_targets.snapshot.json"
 NFT_TABLE = "awg_geo_domain"
 NFT_NAT_TABLE = "awg_geo_domain_snat"
 NFT_SET = "geo_domain_targets"
@@ -207,6 +209,7 @@ def apply_or_update_nft(table_id: str, endpoint_ips: list[str], iface_cfg: dict)
     Набор {NFT_SET} не очищаем и таблицу ip не удаляем — очистка набора только через --rotate-nft."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     main_exists = run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode == 0
+    created_new_main_table = not main_exists
 
     daddr_ne = (" " + " ".join([f"ip daddr != {ip}" for ip in endpoint_ips])) if endpoint_ips else ""
     oif_guard = f'oifname != "{_nft_escape_iface(AWG_IFACE)}" ' if table_id == TABLE_GEO_TUN else ""
@@ -286,6 +289,8 @@ def apply_or_update_nft(table_id: str, endpoint_ips: list[str], iface_cfg: dict)
         nft_tmp.write_text("\n".join(blob_lines) + "\n", encoding="utf-8")
         run(["nft", "-f", str(nft_tmp)], check=True)
         ensure_backup_table()
+        if created_new_main_table:
+            restore_geo_domain_set_snapshot()
         for _prio in ("78", "88"):
             for _dec in (MARK_FWD_DEC, MARK_LOCAL_DEC):
                 while True:
@@ -384,8 +389,76 @@ def _nft_add_elements_chunked(table: str, set_name: str, elems: list[str]) -> No
                 pass
 
 
+def _valid_geo_set_interval(elem: str) -> bool:
+    """Allow only IPv4 prefixes for nft set elements (no hostnames / injection)."""
+    s = (elem or "").strip()
+    if not s or len(s) > 64:
+        return False
+    rest = s
+    if "/" in s:
+        rest, pls = s.split("/", 1)
+        try:
+            plen = int(pls)
+            if plen < 0 or plen > 32:
+                return False
+        except ValueError:
+            return False
+    parts = rest.split(".")
+    if len(parts) != 4:
+        return False
+    for p in parts:
+        if not p.isdigit():
+            return False
+        v = int(p)
+        if v < 0 or v > 255:
+            return False
+    return True
+
+
+def restore_geo_domain_set_snapshot() -> None:
+    """Reload set elements from disk after apply_or_update_nft created an empty table (post-reboot)."""
+    p = GEO_DOMAIN_SET_SNAPSHOT
+    if not p.is_file():
+        return
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(raw, list):
+        return
+    elems: list[str] = []
+    seen: set[str] = set()
+    for x in raw:
+        if not isinstance(x, str):
+            continue
+        s = x.strip()
+        if not _valid_geo_set_interval(s):
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        elems.append(s)
+    if not elems:
+        return
+    _nft_add_elements_chunked(NFT_TABLE, NFT_SET, elems)
+
+
+def persist_geo_domain_set_snapshot() -> None:
+    """Write current nft set elements to disk when non-empty (skip if empty to keep last snapshot)."""
+    if run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode != 0:
+        return
+    elems = list_interval_set_elements(NFT_TABLE, NFT_SET)
+    if not elems:
+        return
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(sorted(elems), ensure_ascii=False, indent=2) + "\n"
+    tmp = GEO_DOMAIN_SET_SNAPSHOT.with_suffix(GEO_DOMAIN_SET_SNAPSHOT.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, GEO_DOMAIN_SET_SNAPSHOT)
+
+
 def rotate_nft_sets_to_backup() -> None:
-    """Суточная ротация: только этот путь очищает основной set (после копии в backup)."""
+    """Плановая ротация: только этот путь очищает основной set (после копии в backup)."""
     if run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode != 0:
         return
     ensure_backup_table()
@@ -523,6 +596,8 @@ def main():
         geo_ready = geo.setdefault("readyLinks", {})
         geo_ready["domain"] = ready_domain
         write_json(GEO_JSON, geo)
+
+    persist_geo_domain_set_snapshot()
 
 
 if __name__ == "__main__":
