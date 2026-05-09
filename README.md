@@ -42,7 +42,6 @@
 sudo apt-get update -y
 sudo apt-get install -y git
 
-cd /opt   # или другой каталог по вашему выбору
 sudo git clone https://github.com/antspopov/awg-uplink.git
 cd awg-uplink
 ```
