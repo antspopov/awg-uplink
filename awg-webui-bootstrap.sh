@@ -460,8 +460,7 @@ Installs AWG Web UI runtime:
   - env file: $CFG_DIR/webui.env
 
   --uninstall   Полное удаление того, что ставит этот bootstrap (юниты, конфиги, nginx, пакеты apt,
-                amneziawg). См. scripts/uninstall-awg-webui-bootstrap.sh. Ветку minimal снимайте
-                отдельно: scripts/remove-legacy-minimal-awg-uplink.sh
+                amneziawg). См. lib/uninstall-awg-webui-bootstrap.sh.
 
 EOF
 }
@@ -485,7 +484,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ $UPDATE_FILES_ONLY -eq 1 || $NO_START -eq 1 ]]; then
     die "--uninstall cannot be combined with --update-files-only or --no-start"
   fi
-  exec bash "$ROOTDIR/scripts/uninstall-awg-webui-bootstrap.sh"
+  exec bash "$ROOTDIR/lib/uninstall-awg-webui-bootstrap.sh"
 fi
 [[ -d "$WEBUI_SRC" ]] || die "missing $WEBUI_SRC"
 [[ -f "$LIB_SRC/awg-webui-iface-routing-apply.sh" ]] || die "missing iface script in lib/"

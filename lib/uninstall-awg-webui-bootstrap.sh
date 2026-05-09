@@ -3,8 +3,7 @@
 # /opt/awg-uplink, MTProto в /opt, nginx-сайт Web UI, самоподписанные сертификаты, сниппеты dnsmasq/resolved.
 # Затем снимает пакеты, которые bootstrap ставит через apt (включая amneziawg), и при необходимости
 # удаляет DKMS-модуль amneziawg и бинарники awg/awg-quick из исходной сборки.
-#
-# Не трогает артефакты ветки minimal (split, policy-hook) — для них scripts/remove-legacy-minimal-awg-uplink.sh
+# Не трогает артефакты ветки minimal (split, policy-hook).
 #
 # Бэкапы: каталог $PWD/awg-webui-bootstrap-uninstall-ГГГГММДД-ЧЧММСС/ или REMOVE_AWG_WEBUI_UNINSTALL_BACKUP_DIR
 
@@ -28,9 +27,9 @@ die() { echo "[uninstall-awg-webui-bootstrap] ERROR: $*" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: uninstall-awg-webui-bootstrap.sh
+Usage: lib/uninstall-awg-webui-bootstrap.sh
 
-Вызывается из корня репозитория:
+Обычно из корня репозитория:
   cd /path/to/awg-uplink && sudo ./awg-webui-bootstrap.sh --uninstall
 
 Переменные окружения (как у bootstrap): AWG_WEBUI_APP_DIR, AWG_WEBUI_CFG_DIR
@@ -51,7 +50,6 @@ cat <<EOF >&2
 ║  Остановятся сервисы, удалятся конфиги, /opt/awg-uplink, MTProto, nginx.   ║
 ║  Будут сняты пакеты: nginx, dnsmasq, dnscrypt-proxy, nftables, certbot,   ║
 ║  amneziawg и др. (см. список в скрипте) — это может сломать чужие сервисы. ║
-║  Артефакты minimal (split/policy) этот скрипт НЕ удаляет.                ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
 Каталог бэкапов: ${BACKUP_DIR}
@@ -275,6 +273,5 @@ cat <<EOF >&2
 Готово. Бэкапы: ${BACKUP_DIR}
 
 Рекомендуется: sudo reboot — сброс nft-таблиц и маршрутов.
-Старую ветку minimal снимайте отдельно: sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 
 EOF

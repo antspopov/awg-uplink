@@ -88,14 +88,14 @@ sudo ./awg-webui-bootstrap.sh
 
 ## Полная деинсталляция bootstrap
 
-Снимает только то, что ставит **`awg-webui-bootstrap.sh`** (Web UI, geo/dns/firewall-юниты, nginx-сайт, пакеты из списка apt в скрипте, **amneziawg**, MTProto в **`/opt/mtproto-proxy`**, конфиг туннеля **`/etc/amnezia/amneziawg/awg-uplink.conf`** и т.д.). Артефакты **старой ветки minimal** (split, policy-hook) этим режимом **не** удаляются — используйте **`scripts/remove-legacy-minimal-awg-uplink.sh`**.
+Снимает только то, что ставит **`awg-webui-bootstrap.sh`** (Web UI, geo/dns/firewall-юниты, nginx-сайт, пакеты из списка apt в скрипте, **amneziawg**, MTProto в **`/opt/mtproto-proxy`**, конфиг туннеля **`/etc/amnezia/amneziawg/awg-uplink.conf`** и т.д.). Артефакты **старой ветки minimal** (split, policy-hook) этим режимом **не** затрагиваются.
 
 ```bash
 cd /path/to/awg-uplink
 sudo ./awg-webui-bootstrap.sh --uninstall
 ```
 
-Реальная логика в **`scripts/uninstall-awg-webui-bootstrap.sh`**: после предупреждения нужно ввести **`DELETE-AWG-WEBUI-BOOTSTRAP`**. Бэкапы создаются в **`$PWD/awg-webui-bootstrap-uninstall-…/`** (или **`REMOVE_AWG_WEBUI_UNINSTALL_BACKUP_DIR`**).
+Реальная логика в **`lib/uninstall-awg-webui-bootstrap.sh`**: после предупреждения нужно ввести **`DELETE-AWG-WEBUI-BOOTSTRAP`**. Бэкапы создаются в **`$PWD/awg-webui-bootstrap-uninstall-…/`** (или **`REMOVE_AWG_WEBUI_UNINSTALL_BACKUP_DIR`**).
 
 После удаления выполните **`sudo reboot`**, затем при необходимости заново **`sudo ./awg-webui-bootstrap.sh`**.
 

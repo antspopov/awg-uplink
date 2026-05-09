@@ -74,7 +74,7 @@ else
 fi
 
 if [[ "${AWG_UNINSTALL_NONINTERACTIVE:-}" == 1 ]]; then
-	echo "[remove-legacy-minimal] AWG_UNINSTALL_NONINTERACTIVE=1 — пропуск ввода DELETE-MINIMAL-AWG-UPLINK (вызов из awg-webui-bootstrap.sh --uninstall)." >&2
+	echo "[remove-legacy-minimal] AWG_UNINSTALL_NONINTERACTIVE=1 — пропуск ввода DELETE-MINIMAL-AWG-UPLINK." >&2
 else
 	read -r -p "Введите точную фразу DELETE-MINIMAL-AWG-UPLINK для продолжения: " confirm
 	if [[ "$confirm" != "DELETE-MINIMAL-AWG-UPLINK" ]]; then
