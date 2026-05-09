@@ -16,8 +16,9 @@ CFG_DIR = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui"))
 CIF_JSON = CFG_DIR / "interfaces.json"
 GEO_JSON = CFG_DIR / "georouting.json"
 CACHE_DIR = Path("/var/lib/awg-uplink/geo-domain")
-# JSON list of nft interval strings; used only when ip awg_geo_domain is created empty (e.g. after reboot).
+# JSON list of nft interval strings; restore when matching table is created empty (e.g. after reboot).
 GEO_DOMAIN_SET_SNAPSHOT = CACHE_DIR / "geo_domain_targets.snapshot.json"
+GEO_DOMAIN_SET_BACKUP_SNAPSHOT = CACHE_DIR / "geo_domain_targets_backup.snapshot.json"
 NFT_TABLE = "awg_geo_domain"
 NFT_NAT_TABLE = "awg_geo_domain_snat"
 NFT_SET = "geo_domain_targets"
@@ -288,9 +289,11 @@ def apply_or_update_nft(table_id: str, endpoint_ips: list[str], iface_cfg: dict)
         run(["nft", "delete", "table", "ip", NFT_NAT_TABLE], check=False)
         nft_tmp.write_text("\n".join(blob_lines) + "\n", encoding="utf-8")
         run(["nft", "-f", str(nft_tmp)], check=True)
-        ensure_backup_table()
+        created_new_backup_table = ensure_backup_table()
         if created_new_main_table:
             restore_geo_domain_set_snapshot()
+        if created_new_backup_table:
+            restore_geo_domain_backup_set_snapshot()
         for _prio in ("78", "88"):
             for _dec in (MARK_FWD_DEC, MARK_LOCAL_DEC):
                 while True:
@@ -345,10 +348,11 @@ def list_interval_set_elements(table: str, set_name: str) -> list[str]:
     return out
 
 
-def ensure_backup_table() -> None:
+def ensure_backup_table() -> bool:
+    """Ensure ip awg_geo_domain_backup exists. Returns True if the table was just created."""
     p = run(["nft", "list", "table", "ip", NFT_TABLE_BACKUP], check=False)
     if p.returncode == 0:
-        return
+        return False
     nft_tmp = Path(tempfile.mkstemp(prefix="awg-geo-domain-backup-", suffix=".nft")[1])
     try:
         nft_tmp.write_text(
@@ -366,6 +370,7 @@ def ensure_backup_table() -> None:
             encoding="utf-8",
         )
         run(["nft", "-f", str(nft_tmp)], check=True)
+        return True
     finally:
         try:
             nft_tmp.unlink(missing_ok=True)
@@ -415,18 +420,16 @@ def _valid_geo_set_interval(elem: str) -> bool:
     return True
 
 
-def restore_geo_domain_set_snapshot() -> None:
-    """Reload set elements from disk after apply_or_update_nft created an empty table (post-reboot)."""
-    p = GEO_DOMAIN_SET_SNAPSHOT
-    if not p.is_file():
-        return
+def _interval_elems_from_snapshot_file(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return
+        return []
     if not isinstance(raw, list):
-        return
-    elems: list[str] = []
+        return []
+    out: list[str] = []
     seen: set[str] = set()
     for x in raw:
         if not isinstance(x, str):
@@ -437,24 +440,43 @@ def restore_geo_domain_set_snapshot() -> None:
         if s in seen:
             continue
         seen.add(s)
-        elems.append(s)
-    if not elems:
-        return
-    _nft_add_elements_chunked(NFT_TABLE, NFT_SET, elems)
+        out.append(s)
+    return out
 
 
-def persist_geo_domain_set_snapshot() -> None:
-    """Write current nft set elements to disk when non-empty (skip if empty to keep last snapshot)."""
-    if run(["nft", "list", "table", "ip", NFT_TABLE], check=False).returncode != 0:
+def _restore_set_snapshot_file(path: Path, table: str, set_name: str) -> None:
+    elems = _interval_elems_from_snapshot_file(path)
+    if elems:
+        _nft_add_elements_chunked(table, set_name, elems)
+
+
+def restore_geo_domain_set_snapshot() -> None:
+    """Reload primary set from disk after apply_or_update_nft created an empty awg_geo_domain (post-reboot)."""
+    _restore_set_snapshot_file(GEO_DOMAIN_SET_SNAPSHOT, NFT_TABLE, NFT_SET)
+
+
+def restore_geo_domain_backup_set_snapshot() -> None:
+    """Reload backup set from disk after ensure_backup_table created an empty awg_geo_domain_backup."""
+    _restore_set_snapshot_file(GEO_DOMAIN_SET_BACKUP_SNAPSHOT, NFT_TABLE_BACKUP, NFT_SET_BACKUP)
+
+
+def _persist_interval_set_snapshot(table: str, set_name: str, dest: Path) -> None:
+    if run(["nft", "list", "table", "ip", table], check=False).returncode != 0:
         return
-    elems = list_interval_set_elements(NFT_TABLE, NFT_SET)
+    elems = list_interval_set_elements(table, set_name)
     if not elems:
         return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     body = json.dumps(sorted(elems), ensure_ascii=False, indent=2) + "\n"
-    tmp = GEO_DOMAIN_SET_SNAPSHOT.with_suffix(GEO_DOMAIN_SET_SNAPSHOT.suffix + f".tmp.{os.getpid()}")
+    tmp = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, GEO_DOMAIN_SET_SNAPSHOT)
+    os.replace(tmp, dest)
+
+
+def persist_geo_domain_set_snapshots() -> None:
+    """Write primary and backup nft set elements when non-empty (skip empty sets to keep last snapshot)."""
+    _persist_interval_set_snapshot(NFT_TABLE, NFT_SET, GEO_DOMAIN_SET_SNAPSHOT)
+    _persist_interval_set_snapshot(NFT_TABLE_BACKUP, NFT_SET_BACKUP, GEO_DOMAIN_SET_BACKUP_SNAPSHOT)
 
 
 def rotate_nft_sets_to_backup() -> None:
@@ -597,7 +619,7 @@ def main():
         geo_ready["domain"] = ready_domain
         write_json(GEO_JSON, geo)
 
-    persist_geo_domain_set_snapshot()
+    persist_geo_domain_set_snapshots()
 
 
 if __name__ == "__main__":
