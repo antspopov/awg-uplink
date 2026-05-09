@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily rotate geo domain nft sets
+Description=Weekly rotate geo domain nft sets
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+OnCalendar=Sun *-*-* 03:30:00
 AccuracySec=10min
 RandomizedDelaySec=30min
 Persistent=true

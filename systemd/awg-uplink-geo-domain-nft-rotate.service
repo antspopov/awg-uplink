@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily geo domain nft set rotate (backup snapshot, flush primary)
+Description=Weekly geo domain nft set rotate (backup snapshot, flush primary)
 After=network-online.target
 
 [Service]

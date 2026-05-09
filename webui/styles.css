@@ -303,6 +303,12 @@ body::before {
 
 .iface-config-gate {
   position: relative;
+  /* Same vertical rhythm as .grid gap between «Сохранить» and the tunnel card when it lived inside interface-grid. */
+  margin-top: 14px;
+}
+
+.iface-config-gate > .interface-tunnel-card {
+  width: 100%;
 }
 
 .iface-config-gate.is-locked {
