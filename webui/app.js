@@ -53,6 +53,16 @@ function basePath() {
   return (window.__AWG_BASE_PATH__ || "/").replace(/\/?$/, "/");
 }
 
+/** Session expired or server restarted in-memory sessions — send user to login. */
+function redirectToWebUiLogin() {
+  try {
+    const next = encodeURIComponent(`${window.location.pathname}${window.location.search || ""}`);
+    window.location.href = `${basePath()}login.html?next=${next}`;
+  } catch {
+    window.location.href = `${basePath()}login.html`;
+  }
+}
+
 function fmtBytesPerSec(n) {
   const v = Number(n) || 0;
   if (v < 1024) return `${v.toFixed(0)} B/s`;
@@ -401,8 +411,7 @@ function initImportModal(state) {
 async function fetchJson(path) {
   const res = await fetchWithReconnect(`${basePath()}${path.replace(/^\//, "")}`, { credentials: "include" }, { retries: 12, delayMs: 1000 });
   if (res.status === 401) {
-    const next = encodeURIComponent(window.location.pathname);
-    window.location.href = `${basePath()}login.html?next=${next}`;
+    redirectToWebUiLogin();
     return null;
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -568,6 +577,10 @@ async function postJson(path, body, retryCfg = null) {
     },
     retryCfg || { retries: 0 }
   );
+  if (res.status === 401) {
+    redirectToWebUiLogin();
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
   return res.json().catch(() => ({}));
 }

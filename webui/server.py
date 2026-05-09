@@ -44,6 +44,50 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on", "y")
 
 
+def _webui_sessions_file() -> Path:
+    return Path(os.environ.get("AWG_WEBUI_SESSIONS_FILE", "/var/lib/awg-uplink-webui/sessions.json"))
+
+
+def _load_webui_sessions_from_disk() -> dict[str, dict]:
+    """Restore cookie sessions across webui process restarts (tokens still valid by exp)."""
+    p = _webui_sessions_file()
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    out: dict[str, dict] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or len(k) > 256:
+            continue
+        if not isinstance(v, dict):
+            continue
+        exp = v.get("exp")
+        u = v.get("u")
+        if not isinstance(exp, (int, float)) or exp < now:
+            continue
+        if not isinstance(u, str) or not u.strip():
+            continue
+        out[k] = {"u": u, "exp": float(exp)}
+    return out
+
+
+def _save_webui_sessions_to_disk(sessions: dict[str, dict]) -> None:
+    p = _webui_sessions_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(sessions, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -564,8 +608,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         self._realm = kwargs.pop("realm")
         self._secret = kwargs.pop("secret")
         self._sessions = kwargs.pop("sessions")
+        self._sessions_lock: threading.Lock = kwargs.pop("sessions_lock")
         self._nonces = kwargs.pop("nonces")
         super().__init__(*args, directory=directory, **kwargs)
+
+    def _persist_sessions(self) -> None:
+        if not self._auth_enabled:
+            return
+        try:
+            _save_webui_sessions_to_disk(self._sessions)
+        except OSError:
+            pass
 
     def _strip_base(self, path: str) -> str | None:
         if not path.startswith(self._base_path):
@@ -598,16 +651,18 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return None
 
     def _session_user(self) -> str | None:
-        tok = self._read_cookie("AWGSESS")
-        if not tok:
-            return None
-        s = self._sessions.get(tok)
-        if not s:
-            return None
-        if s["exp"] < time.time():
-            self._sessions.pop(tok, None)
-            return None
-        return s["u"]
+        with self._sessions_lock:
+            tok = self._read_cookie("AWGSESS")
+            if not tok:
+                return None
+            s = self._sessions.get(tok)
+            if not s:
+                return None
+            if s["exp"] < time.time():
+                self._sessions.pop(tok, None)
+                self._persist_sessions()
+                return None
+            return s["u"]
 
     def _require_session(self) -> bool:
         if not self._auth_enabled:
@@ -2370,12 +2425,14 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return
 
         if self._auth_enabled and not self._require_session():
-            # redirect to login "window"
-            next_path = sp if sp.startswith("/") else self._base_path
-            self.send_response(302)
-            self.send_header("Location", f"{self._base_path}login.html?next={next_path}")
-            self.end_headers()
-            return
+            # API clients use fetch() + JSON: 302 to login returns HTML and breaks res.json().
+            # Return 401 for /api/* (except /api/auth/*); keep 302 for full-page navigation.
+            if not (sp.startswith("/api/") and not sp.startswith("/api/auth/")):
+                next_path = sp if sp.startswith("/") else self._base_path
+                self.send_response(302)
+                self.send_header("Location", f"{self._base_path}login.html?next={next_path}")
+                self.end_headers()
+                return
 
         if sp == "/config.js":
             self.send_response(200)
@@ -2499,11 +2556,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return
 
         if self._auth_enabled and not self._require_session():
-            next_path = sp if sp.startswith("/") else self._base_path
-            self.send_response(302)
-            self.send_header("Location", f"{self._base_path}login.html?next={next_path}")
-            self.end_headers()
-            return
+            if not (sp.startswith("/api/") and not sp.startswith("/api/auth/")):
+                next_path = sp if sp.startswith("/") else self._base_path
+                self.send_response(302)
+                self.send_header("Location", f"{self._base_path}login.html?next={next_path}")
+                self.end_headers()
+                return
 
         if sp == "/config.js":
             self.send_response(200)
@@ -2570,8 +2628,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if not self._verify_digest_login(body):
                 return self._send_text(401, "Unauthorized")
             token = secrets.token_hex(24)
+            with self._sessions_lock:
+                self._sessions[token] = {"u": self._username, "exp": time.time() + 12 * 3600}
+                self._persist_sessions()
             self.send_response(200)
-            self._sessions[token] = {"u": self._username, "exp": time.time() + 12 * 3600}
             self._set_cookie(token)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
@@ -2582,8 +2642,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if not self._auth_enabled:
                 return self._send_json(200, {"ok": True, "disabled": True})
             tok = self._read_cookie("AWGSESS")
-            if tok:
-                self._sessions.pop(tok, None)
+            with self._sessions_lock:
+                if tok:
+                    self._sessions.pop(tok, None)
+                self._persist_sessions()
             self.send_response(200)
             self._clear_cookie()
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2881,8 +2943,9 @@ def main():
     secret = _sha256_hex(f"{user}:{realm}:{pwd}")
 
     directory = str(Path(__file__).parent.resolve())
-    sessions: dict[str, dict] = {}
+    sessions: dict[str, dict] = _load_webui_sessions_from_disk() if auth_enabled else {}
     nonces: dict[str, float] = {}
+    sessions_lock = threading.Lock()
 
     def handler(*h_args, **h_kwargs):
         return WebUIHandler(
@@ -2895,6 +2958,7 @@ def main():
             realm=realm,
             secret=secret,
             sessions=sessions,
+            sessions_lock=sessions_lock,
             nonces=nonces,
             **h_kwargs,
         )
