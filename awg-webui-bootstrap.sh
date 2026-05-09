@@ -359,6 +359,33 @@ add_amnezia_apt_ubuntu() {
   add-apt-repository -y ppa:amnezia/ppa
 }
 
+# После apt install метапакет amneziawg не гарантирует, что DKMS уже собрал .ko под текущее ядро
+# (типично: нет linux-headers на момент postinst). Без модуля «awg-quick up» падает с Unknown device type.
+ensure_amneziawg_kmod_after_apt() {
+  if modprobe -n amneziawg &>/dev/null; then
+    return 0
+  fi
+  local hdr="linux-headers-$(uname -r)"
+  log "модуль amneziawg для ядра $(uname -r) не в дереве — догонка DKMS (нужны ${hdr})"
+  if ! dpkg-query -W -f='${Status}' "$hdr" 2>/dev/null | grep -q 'install ok installed'; then
+    apt-get install -y "$hdr" || log "warning: не удалось установить ${hdr}"
+  fi
+  if command -v dkms >/dev/null 2>&1; then
+    dkms autoinstall || true
+  fi
+  depmod -a 2>/dev/null || true
+  if modprobe -n amneziawg &>/dev/null; then
+    return 0
+  fi
+  log "DKMS autoinstall не помог — пробую переустановить amneziawg-dkms"
+  apt-get install --reinstall -y amneziawg-dkms 2>/dev/null || true
+  if command -v dkms >/dev/null 2>&1; then
+    dkms autoinstall || true
+  fi
+  depmod -a 2>/dev/null || true
+  modprobe -n amneziawg &>/dev/null
+}
+
 ensure_amneziawg() {
   if amneziawg_stack_ready; then
     log "AmneziaWG (awg-quick и модуль/DKMS) уже в порядке — шаг пропускается."
@@ -381,6 +408,7 @@ ensure_amneziawg() {
   apt-get update -qq
   if apt-get install -y amneziawg; then
     awg_quick_present || die "amneziawg installed but awg-quick not found"
+    ensure_amneziawg_kmod_after_apt || die "amneziawg из apt установлен, но модуль ядра недоступен для $(uname -r) (проверьте dkms status, /var/lib/dkms/amneziawg/*/build/make.log; после смены ядра может понадобиться reboot)"
     log "amneziawg installed from apt."
     return 0
   fi
