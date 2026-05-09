@@ -1510,6 +1510,16 @@ select:disabled option {
   padding: 14px 16px;
 }
 
+.modal-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0 0 10px;
+}
+
+.modal-hint code {
+  font-size: 11px;
+}
+
 .modal-actions {
   padding: 12px 16px 16px 16px;
   display: flex;

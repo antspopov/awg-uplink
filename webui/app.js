@@ -757,7 +757,11 @@ async function refreshMtprotoState(state) {
 
     state.mtproto = s;
     $("mtpConfigPathLabel").textContent = `Путь: ${s.config_path || "--"}`;
-    $("mtpConfigText").value = s.config_text || "";
+    const mtpCfgOverlay = $("mtpConfigModalOverlay");
+    const mtpCfgEditorOpen = Boolean(mtpCfgOverlay && !mtpCfgOverlay.classList.contains("hidden"));
+    if (!mtpCfgEditorOpen) {
+      $("mtpConfigText").value = s.config_text || "";
+    }
 
     const cfgOk = Boolean(s.config_exists);
     const mtInstallBtn = document.getElementById("mtpInstallBtn");

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>awg-uplink — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260509-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-3" />
   </head>
   <body>
     <div class="app">
@@ -651,6 +651,13 @@
           <button class="icon-btn" id="mtpConfigModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
         </div>
         <div class="modal-body">
+          <p class="muted modal-hint">
+            После «Сохранить» синхронизация Web UI может заново записать некоторые поля:
+            секция <code>[upstream]</code> (режим исходящего интерфейса),
+            в <code>[censorship]</code> — <code>mask</code>, <code>mask_port</code>, при заданном домене окружения —
+            <code>tls_domain</code>, в <code>[server]</code> — производные IP. Поле <code>drs</code> сохраняется как у вас
+            в тексте (по умолчанию включается при установке только если строки не было).
+          </p>
           <textarea id="mtpConfigText" rows="16" placeholder="[server]&#10;..."></textarea>
         </div>
         <div class="modal-actions">
@@ -764,7 +771,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260509-1"></script>
+    <script src="./app.js?v=20260509-2"></script>
   </body>
 </html>
 

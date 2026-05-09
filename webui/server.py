@@ -524,7 +524,9 @@ def _upsert_mtproto_censorship_cfg(cfg_text: str, domain: str, mask_port: int) -
 
     section = replace_or_add(section, "mask", "true")
     section = replace_or_add(section, "mask_port", str(int(mask_port)))
-    section = replace_or_add(section, "drs", "true")
+    # Install sets drs=true; do not overwrite on every sync — allow manual edits in config.toml.
+    if not re.search(r"(?m)^\s*drs\s*=", section):
+        section = replace_or_add(section, "drs", "true")
     dom = str(domain or "").strip()
     if dom:
         section = replace_or_add(section, "tls_domain", f'"{dom}"')
