@@ -117,6 +117,30 @@ def _reload_or_restart_service(unit: str, reload_timeout: float = 8.0, restart_t
     return rc, out, err, "restart"
 
 
+def _schedule_mtproto_user_config_restart(unit: str, defer_s: float = 0.25, restart_timeout: float = 25.0) -> None:
+    """
+    MTProto picks up [access.users] changes only after a full restart; reload is not enough.
+    When the browser uses the same :443 front (e.g. via the proxy), an in-request restart
+    drops the TCP session and breaks the API call. Schedule restart after a short defer so
+    the HTTP response can be delivered first.
+    """
+
+    def _worker():
+        try:
+            time.sleep(defer_s)
+        except Exception:
+            pass
+        u = str(unit or "").strip()
+        if not u:
+            return
+        rc, out, err = _run(["systemctl", "restart", u], timeout=restart_timeout)
+        if rc != 0:
+            msg = (err or out or "unknown error").strip()
+            print(f"[awg-webui] deferred systemctl restart failed for {u}: {msg}", flush=True)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def _read_text(path: str, default: str = "") -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -2017,6 +2041,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         *,
         persist_outbound_mode: str | None = None,
         apply_upstream: bool = True,
+        restart_mtproto: bool = True,
     ) -> dict:
         cfg_path = self._mtproto_config_path()
         cfg_text = _read_text(cfg_path, "")
@@ -2079,9 +2104,22 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "warnings": warnings,
                 "error": str(ex),
             }
+        if not restart_mtproto:
+            resp: dict = {
+                "ok": True,
+                "mode": mode,
+                "warnings": warnings,
+                "service_action": "none",
+                "public_ip": pub,
+                "middle_proxy_nat_ip": server_updates.get("middle_proxy_nat_ip", ""),
+            }
+            if mode == "tunnel" and not self._tunnel_iface_up():
+                warnings.append("Интерфейс awg-uplink не UP — проверьте VPN.")
+            resp["warnings"] = warnings
+            return resp
         svc = self._mtproto_service_name()
         rc, out, err, action = _reload_or_restart_service(svc, reload_timeout=8.0, restart_timeout=20.0)
-        resp: dict = {
+        resp = {
             "ok": rc == 0,
             "mode": mode,
             "warnings": warnings,
@@ -2815,8 +2853,22 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 _write_text(cfg_path, cfg_text)
             except OSError as e:
                 return self._send_text(500, f"failed to write config: {e}")
-            sync = self._sync_mtproto_derived_config(apply_upstream=False)
-            return self._send_json(200, {"ok": True, "mtproto_sync": sync})
+            sync = self._sync_mtproto_derived_config(apply_upstream=False, restart_mtproto=False)
+            if not sync.get("ok"):
+                return self._send_text(500, str(sync.get("error", "")).strip() or "mtproto sync failed")
+            applied_cfg = _read_text(cfg_path, "")
+            svc = self._mtproto_service_name()
+            _schedule_mtproto_user_config_restart(svc)
+            return self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "mtproto_sync": sync,
+                    "service_action": "restart",
+                    "restart_deferred": True,
+                    "config_text_applied": applied_cfg,
+                },
+            )
 
         if sp == "/api/mtproto/users/upsert":
             if self._auth_enabled and not self._session_user():
@@ -2836,10 +2888,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
             svc = self._mtproto_service_name()
-            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
-            if rc != 0:
-                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
-            return self._send_json(200, {"ok": True, "service_action": "restart"})
+            _schedule_mtproto_user_config_restart(svc)
+            return self._send_json(
+                200,
+                {"ok": True, "service_action": "restart", "restart_deferred": True},
+            )
 
         if sp == "/api/mtproto/users/toggle":
             if self._auth_enabled and not self._session_user():
@@ -2865,10 +2918,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
             svc = self._mtproto_service_name()
-            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
-            if rc != 0:
-                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
-            return self._send_json(200, {"ok": True, "service_action": "restart"})
+            _schedule_mtproto_user_config_restart(svc)
+            return self._send_json(
+                200,
+                {"ok": True, "service_action": "restart", "restart_deferred": True},
+            )
 
         if sp == "/api/mtproto/users/delete":
             if self._auth_enabled and not self._session_user():
@@ -2889,10 +2943,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
             svc = self._mtproto_service_name()
-            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
-            if rc != 0:
-                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
-            return self._send_json(200, {"ok": True, "service_action": "restart"})
+            _schedule_mtproto_user_config_restart(svc)
+            return self._send_json(
+                200,
+                {"ok": True, "service_action": "restart", "restart_deferred": True},
+            )
 
         return self._send_text(404, "Not Found")
 

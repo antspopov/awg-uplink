@@ -40,6 +40,12 @@ function hideBusyOverlay() {
   if (__busyOverlayCounter === 0) root.classList.add("hidden");
 }
 
+function setBusyOverlayText(text = "Выполняется…") {
+  const root = document.getElementById("busyOverlay");
+  const label = root && root.querySelector("#busyOverlayText");
+  if (label) label.textContent = text;
+}
+
 async function withBusyOverlay(text, fn) {
   showBusyOverlay(text);
   try {
@@ -908,6 +914,92 @@ async function refreshMtprotoState(state) {
   }
 }
 
+function findMtprotoUserInState(mtprotoState, username) {
+  const list = (mtprotoState && mtprotoState.users) || [];
+  return list.find((x) => String(x.username || "") === String(username));
+}
+
+/**
+ * Server returns quickly and restarts MTProto in the background (same :443 would drop an in-flight request).
+ * Poll /api/mtproto/state until the unit is healthy and optional predicate matches (config on disk).
+ */
+async function waitMtprotoHealthyAfterMutation(state, predicate, opts = {}) {
+  const minWaitMs = opts.minWaitMs ?? 400;
+  const timeoutMs = opts.timeoutMs ?? 90000;
+  const pollMs = opts.pollMs ?? 300;
+  const stableOkRounds = opts.stableOkRounds ?? 2;
+
+  await sleepMs(minWaitMs);
+  let streak = 0;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await refreshMtprotoState(state);
+    const m = state.mtproto;
+    const svcOk = Boolean(m && m.service && m.service.ok);
+    const predOk = !predicate || predicate(m);
+    if (svcOk && predOk) {
+      streak++;
+      if (streak >= stableOkRounds) return;
+    } else {
+      streak = 0;
+    }
+    await sleepMs(pollMs);
+  }
+  throw new Error("MTProto не поднялся после перезапуска или состояние не совпало с ожиданием");
+}
+
+function normalizeMtprotoConfigText(s) {
+  return String(s || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+async function waitMtprotoHealthyAfterConfigSave(state, appliedText) {
+  const want = normalizeMtprotoConfigText(appliedText);
+  await waitMtprotoHealthyAfterMutation(
+    state,
+    (m) => normalizeMtprotoConfigText(m && m.config_text) === want,
+    {}
+  );
+}
+
+async function waitMtprotoHealthyAfterUserMutation(state, spec) {
+  const kind = spec.kind;
+  if (kind === "upsert") {
+    const un = spec.username;
+    const sec = String(spec.secret || "");
+    await waitMtprotoHealthyAfterMutation(
+      state,
+      (m) => {
+        const u = findMtprotoUserInState(m, un);
+        return Boolean(u && u.enabled !== false && String(u.secret || "").toLowerCase() === sec.toLowerCase());
+      },
+      {}
+    );
+    return;
+  }
+  if (kind === "delete") {
+    const un = spec.username;
+    await waitMtprotoHealthyAfterMutation(state, (m) => !findMtprotoUserInState(m, un), {});
+    return;
+  }
+  if (kind === "toggle") {
+    const un = spec.username;
+    const want = Boolean(spec.enabled);
+    await waitMtprotoHealthyAfterMutation(
+      state,
+      (m) => {
+        const u = findMtprotoUserInState(m, un);
+        if (!u) return false;
+        return Boolean(u.enabled) === want;
+      },
+      {}
+    );
+    return;
+  }
+  throw new Error("waitMtprotoHealthyAfterUserMutation: unknown kind");
+}
+
 function dnsCfgBool(v, defaultVal = false) {
   if (v === true) return true;
   if (v === false) return false;
@@ -1244,9 +1336,10 @@ function initMtprotoPanel(state) {
     try {
       await withBusyOverlay("Сохраняем пользователя MTProto…", async () => {
         await postJson("/api/mtproto/users/upsert", { username, secret });
+        setBusyOverlayText("Дожидаемся перезапуска MTProto…");
+        await waitMtprotoHealthyAfterUserMutation(state, { kind: "upsert", username, secret });
       });
       setUserFormStatus("Сохранено.", "ok");
-      await refreshMtprotoState(state); // immediate refresh
       toast("Пользователь сохранен.", "ok");
       $("mtpUserName").value = "";
       $("mtpUserSecret").value = "";
@@ -1271,8 +1364,9 @@ function initMtprotoPanel(state) {
       try {
         await withBusyOverlay("Удаляем пользователя MTProto…", async () => {
           await postJson("/api/mtproto/users/delete", { username: uname });
+          setBusyOverlayText("Дожидаемся перезапуска MTProto…");
+          await waitMtprotoHealthyAfterUserMutation(state, { kind: "delete", username: uname });
         });
-        await refreshMtprotoState(state); // immediate refresh
         toast("Пользователь удален.", "ok");
       } catch {
         setStatusById("mtprotoUsersStatus", "dot--bad", "ошибка удаления");
@@ -1288,13 +1382,18 @@ function initMtprotoPanel(state) {
         renderMtprotoUsers(state.mtproto.users, pendingToggles);
       }
       try {
-        await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: targetEnabled });
-        toast(enabledNow ? "Пользователь выключен." : "Пользователь включен.", "ok");
+        await withBusyOverlay("Переключаем пользователя MTProto…", async () => {
+          await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: targetEnabled });
+          setBusyOverlayText("Дожидаемся перезапуска MTProto…");
+          await waitMtprotoHealthyAfterUserMutation(state, {
+            kind: "toggle",
+            username: toggleUser,
+            enabled: targetEnabled,
+          });
+        });
+        delete pendingToggles[toggleUser];
         await refreshMtprotoState(state);
-        for (let i = 0; i < 12 && pendingToggles[toggleUser]; i++) {
-          await sleepMs(120);
-          await refreshMtprotoState(state);
-        }
+        toast(enabledNow ? "Пользователь выключен." : "Пользователь включен.", "ok");
       } catch {
         delete pendingToggles[toggleUser];
         await refreshMtprotoState(state);
@@ -1332,7 +1431,18 @@ function initMtprotoPanel(state) {
   $("mtpConfigSaveBtn").addEventListener("click", async () => {
     try {
       const res = await withBusyOverlay("Сохраняем config.toml MTProto…", async () => {
-        return await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
+        const r = await postJson("/api/mtproto/config/save", { config_text: $("mtpConfigText").value });
+        if (r && r.restart_deferred) {
+          setBusyOverlayText("Дожидаемся перезапуска MTProto…");
+          const applied =
+            r && typeof r.config_text_applied === "string" ? r.config_text_applied : null;
+          if (applied !== null) {
+            await waitMtprotoHealthyAfterConfigSave(state, applied);
+          } else {
+            await waitMtprotoHealthyAfterMutation(state, null, {});
+          }
+        }
+        return r;
       });
       setStatusById("mtpConfigStatus", "dot--ok", "сохранено");
       $("mtpConfigModalOverlay").classList.add("hidden");
