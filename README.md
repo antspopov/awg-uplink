@@ -145,7 +145,7 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 - убирает **nginx**-сайты и сниппеты проекта (в т.ч. **awg-uplink-webui**), при необходимости включает дефолтный **`sites-enabled/default`**; удаляет **`/etc/ssl/awg-uplink-webui`**;
 - при наличии стека Web UI: бэкап и удаление **`/etc/awg-uplink-webui`**, **`/var/lib/awg-uplink-webui`**, **`/opt/awg-uplink`**, отключение связанных **systemd**-юнитов.
 
-Пакет **amneziawg** скрипт **не** удаляет (оставьте `apt` при необходимости).
+Пакеты **amneziawg** и **amneziawg-tools** снимаются через **`apt-get remove --purge`** (в PPA они раздельно; иначе после миграции мог остаться **`awg-quick`** без модуля). При необходимости снимается PPA **amnezia** и файл **`/etc/apt/sources.list.d/amnezia-ppa.list`**.
 
 **После скрипта обязательно выполните полную перезагрузку сервера:** `sudo reboot` — так надёжнее сбросить **nftables**-таблицы и маршрутизацию, оставшиеся от старых правил. Уже **после reboot** запускайте `sudo ./awg-webui-bootstrap.sh`.
 

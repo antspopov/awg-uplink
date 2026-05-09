@@ -17,6 +17,7 @@ set -euo pipefail
 
 CANON_STEM=awg-uplink
 WG_CONF=/etc/amnezia/amneziawg/${CANON_STEM}.conf
+AMNEZIA_APT_LIST=/etc/apt/sources.list.d/amnezia-ppa.list
 REMOVE_WG_CONF_FILE=1
 
 usage() {
@@ -62,6 +63,8 @@ cat <<EOF >&2
     каталог /etc/ssl/awg-uplink-webui (самоподписанные сертификаты мастера Web UI)
   • Если есть Web UI стека main: бэкап и удаление /etc/awg-uplink-webui, /var/lib/awg-uplink-webui, /opt/awg-uplink;
     отключение awg-uplink-webui, awg-webui-ifaces, geo/dns/firewall юнитов проекта (файлы в /etc/systemd/system)
+  • AmneziaWG: modprobe -r, снятие DKMS amneziawg, purge пакетов amneziawg и amneziawg-tools (в PPA они раздельно),
+    при необходимости снятие PPA amnezia; остатки awg/awg-quick вне dpkg и /usr/src/amneziawg-*
 
 После скрипта в README: выполните **полный перезагрузку ОС** (reboot), чтобы сбросить nft-таблицы и зависшие маршруты.
 
@@ -276,6 +279,52 @@ if systemctl is-active --quiet nginx 2>/dev/null; then
 		log "nginx -t не прошёл — проверьте конфиг; при необходимости: apt-get install --reinstall nginx-common"
 	fi
 fi
+
+log "AmneziaWG: modprobe -r (если загружен)"
+modprobe -r amneziawg 2>/dev/null || true
+
+log "AmneziaWG: DKMS remove (если есть)"
+if command -v dkms >/dev/null 2>&1; then
+	while IFS= read -r line; do
+		[[ "$line" =~ ^amneziawg/([^,]+), ]] || continue
+		ver="${BASH_REMATCH[1]// /}"
+		[[ -n "$ver" ]] || continue
+		dkms remove -m amneziawg -v "$ver" --all --force 2>/dev/null || true
+	done < <(dkms status 2>/dev/null | grep '^amneziawg/' || true)
+fi
+
+rm -rf -- /usr/src/amneziawg-* 2>/dev/null || true
+
+if command -v apt-get >/dev/null 2>&1; then
+	export DEBIAN_FRONTEND=noninteractive
+	log "apt: снятие PPA Amnezia (Ubuntu) или списка, purge amneziawg / amneziawg-tools"
+	if [[ -f /etc/os-release ]]; then
+		# shellcheck disable=SC1091
+		. /etc/os-release
+		case "${ID:-}" in
+			ubuntu|pop)
+				if command -v add-apt-repository >/dev/null 2>&1; then
+					add-apt-repository -y --remove ppa:amnezia/ppa 2>/dev/null || true
+				fi
+				;;
+		esac
+	fi
+	rm -f -- "$AMNEZIA_APT_LIST"
+	apt-get update -qq || true
+	log "apt-get remove --purge amneziawg amneziawg-tools…"
+	if ! apt-get remove --purge -y amneziawg amneziawg-tools; then
+		log "warning: amneziawg/amneziawg-tools не полностью удалены (уже сняты или нет в apt)"
+	fi
+	apt-get autoremove -y >/dev/null 2>&1 || true
+fi
+
+log "бинарники awg/awg-quick вне пакетов (остаток сборки из исходников)"
+	for bin in /usr/bin/awg /usr/bin/awg-quick; do
+		if [[ -e "$bin" ]] && ! dpkg -S "$bin" &>/dev/null; then
+			rm -f -- "$bin"
+			log "удалён $bin"
+		fi
+	done
 
 cat <<EOF >&2
 
