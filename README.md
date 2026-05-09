@@ -109,9 +109,7 @@ sudo ./awg-webui-bootstrap.sh --update-files-only
 
 ## Переход с ветки `minimal-without-geo-routing-and-webui`
 
-Если раньше использовались **`awg-uplink-bootstrap.sh`**, split-юниты и policy-hook, перед установкой **`awg-webui-bootstrap.sh`** снимите артефакты старой схемы (бэкап и консольный доступ обязательны).
-
-Автоматически (скрипт из репозитория, с подтверждением; удаление **необратимо** для перечисленных файлов):
+Если раньше использовались **`awg-uplink-bootstrap.sh`**, split-юниты, policy-hook и/или MTProto, перед чистой установкой **`awg-webui-bootstrap.sh`** снимите артефакты со скриптом **`scripts/remove-legacy-minimal-awg-uplink.sh`** (консольный доступ и снимок ВМ обязательны).
 
 ```bash
 cd /path/to/awg-uplink
@@ -119,11 +117,20 @@ sudo git pull origin main   # или нужная ветка
 sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 ```
 
-Перед запуском скрипт выводит список удаляемого. Для продолжения нужно ввести фразу **`DELETE-MINIMAL-AWG-UPLINK`**. По умолчанию из **`/etc/amnezia/amneziawg/awg-uplink.conf`** удаляются только строки **PostUp/PostDown**, связанные со старым `awg-uplink-policy` (предварительно создаётся файл **`*.bak.<время>`**). Чтобы не трогать `awg-uplink.conf`: `sudo ./scripts/remove-legacy-minimal-awg-uplink.sh --no-strip-wg-conf`.
+**Важно:** запускайте из каталога репозитория (`cd …/awg-uplink`): бэкапы создаются под **`$PWD`** в подкаталог `awg-uplink-legacy-uninstall-ГГГГММДД-ЧЧММСС/` (или задайте **`REMOVE_AWG_LEGACY_BACKUP_DIR=/абсолютный/путь`**).
 
-Скрипт **не** удаляет каталог **`/opt/mtproto-proxy`** и не снимает пакет **amneziawg** — только явные файлы старого minimal-сценария и nginx-сайт дашборда MTProto из того bootstrap.
+Скрипт после предупреждения требует ввести **`DELETE-MINIMAL-AWG-UPLINK`**. Он:
 
-После скрипта: при необходимости `sudo systemctl restart awg-quick@awg-uplink`, затем `sudo ./awg-webui-bootstrap.sh`.
+- останавливает и отключает **split routing** (`awg-uplink-split@…`), удаляет юнит и `awg-uplink-split-main.sh`;
+- останавливает и отключает **`awg-quick@awg-uplink`**;
+- делает бэкап **`awg-uplink.conf`**: оригинал и версия без строк **PostUp / PreUp / PostDown / PreDown** с hook’ами `awg-uplink-policy` / `awg-eth0-policy` / `awg-docker-mark`; по умолчанию файл **`/etc/amnezia/amneziawg/awg-uplink.conf`** затем **удаляется** с диска (остаётся только в каталоге бэкапов). Чтобы оставить очищенный конфиг на месте: **`--keep-wg-conf-on-disk`**;
+- полностью снимает **MTProto**: архив **`/opt/mtproto-proxy`**, отдельная копия **`config.toml`**, отключение и удаление юнитов **`mtproto-proxy`**, **`nfqws-mtproto`**, известных таймеров; каталог **`/opt/mtproto-proxy`** удаляется;
+- убирает **nginx**-сайты и сниппеты проекта (в т.ч. **awg-uplink-webui**), при необходимости включает дефолтный **`sites-enabled/default`**; удаляет **`/etc/ssl/awg-uplink-webui`**;
+- при наличии стека Web UI: бэкап и удаление **`/etc/awg-uplink-webui`**, **`/var/lib/awg-uplink-webui`**, **`/opt/awg-uplink`**, отключение связанных **systemd**-юнитов.
+
+Пакет **amneziawg** скрипт **не** удаляет (оставьте `apt` при необходимости).
+
+**После скрипта обязательно выполните полную перезагрузку сервера:** `sudo reboot` — так надёжнее сбросить **nftables**-таблицы и маршрутизацию, оставшиеся от старых правил. Уже **после reboot** запускайте `sudo ./awg-webui-bootstrap.sh`.
 
 ---
 
