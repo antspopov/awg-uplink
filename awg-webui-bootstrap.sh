@@ -56,114 +56,6 @@ dnsmasq_quarantine_bind_interfaces_snippets() {
   fi
 }
 
-run_awg_webui_uninstall() {
-  cat <<'EOF' >&2
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║  awg-webui-bootstrap --uninstall                                         ║
-║  Удаляются сервисы, каталоги, nginx-конфиги Web UI, MTProto, туннель,      ║
-║  пакеты из списка установки bootstrap (в т.ч. amneziawg), dkms amneziawg. ║
-║  Операция необратима. Консоль / IPMI и снимок ВМ обязательны.              ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-EOF
-  local confirm
-  read -r -p "Введите точную фразу DEINSTALL-AWG-WEBUI-BOOTSTRAP для продолжения: " confirm
-  if [[ "$confirm" != "DEINSTALL-AWG-WEBUI-BOOTSTRAP" ]]; then
-    die "отменено пользователем"
-  fi
-
-  local backup_root
-  backup_root="$ROOTDIR/awg-webui-uninstall-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p -- "$backup_root"
-  log "каталог бэкапов деинсталляции: $backup_root"
-
-  REMOVE_AWG_LEGACY_BACKUP_DIR="$backup_root" AWG_UNINSTALL_NONINTERACTIVE=1 bash "$ROOTDIR/scripts/remove-legacy-minimal-awg-uplink.sh"
-
-  log "удаление drop-in systemd-resolved и dnsmasq из bootstrap..."
-  rm -f -- /etc/systemd/resolved.conf.d/awg-uplink-dns.conf
-  rm -f -- /etc/dnsmasq.d/zzz-awg-uplink-base.conf
-  rm -rf -- /var/lib/awg-uplink
-
-  systemctl daemon-reload || true
-  if systemctl is-enabled --quiet systemd-resolved 2>/dev/null || systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-    systemctl restart systemd-resolved 2>/dev/null || true
-  fi
-
-  if command -v dkms >/dev/null 2>&1; then
-    log "удаление модулей dkms amneziawg (если есть)..."
-    while IFS= read -r line; do
-      [[ "$line" =~ ^amneziawg/([^,]+), ]] || continue
-      dkms remove -m amneziawg -v "${BASH_REMATCH[1]}" --all --force 2>/dev/null || true
-    done < <(dkms status 2>/dev/null || true)
-    dkms remove amneziawg --all --force 2>/dev/null || true
-  fi
-  rm -rf /usr/src/amneziawg-* 2>/dev/null || true
-
-  log "удаление списков репозитория Amnezia (если добавлялись)..."
-  rm -f -- "$AMNEZIA_APT_LIST" /etc/apt/sources.list.d/amnezia*.list 2>/dev/null || true
-  if command -v add-apt-repository >/dev/null 2>&1; then
-    add-apt-repository -y --remove ppa:amnezia/ppa 2>/dev/null || true
-  fi
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
-
-  rm -f -- /usr/bin/awg /usr/bin/awg-quick 2>/dev/null || true
-
-  local -a purge_pkgs=(
-    python3
-    iproute2
-    netplan.io
-    nftables
-    dnsmasq
-    dnscrypt-proxy
-    curl
-    minisign
-    openssl
-    nginx
-    certbot
-    python3-certbot-nginx
-    build-essential
-    gcc
-    g++
-    make
-    libc6-dev
-    amneziawg
-    libmnl-dev
-    libelf-dev
-    libssl-dev
-    debhelper
-    dh-python
-    pkg-config
-    git
-    dkms
-    software-properties-common
-    gnupg2
-  )
-
-  log "apt-get remove --purge (пакеты из установки bootstrap; часть может быть не установлена)..."
-  local p installed=()
-  for p in "${purge_pkgs[@]}"; do
-    if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed"; then
-      installed+=("$p")
-    fi
-  done
-  if [[ ${#installed[@]} -gt 0 ]]; then
-    for p in "${installed[@]}"; do
-      DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y "$p" || log "warning: не удалось purge пакета $p (возможно, essential / зависимости)"
-    done
-  else
-    log "ни один из перечисленных пакетов не установлен (dpkg) — пропуск apt purge"
-  fi
-  DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
-
-  cat <<'EOF' >&2
-
-Готово. Выполните полную перезагрузку: sudo reboot
-(сброс nftables и маршрутизации). Затем при необходимости проверьте /etc/resolv.conf и dnsmasq/nginx вручную.
-
-EOF
-}
-
 WEBUI_DOMAIN=""
 WEBUI_USER="admin"
 WEBUI_PASS=""
@@ -567,10 +459,9 @@ Installs AWG Web UI runtime:
   - config dir: $CFG_DIR
   - env file: $CFG_DIR/webui.env
 
-  --uninstall   Полная деинсталляция: вызывает scripts/remove-legacy-minimal-awg-uplink.sh,
-                удаляет конфиги DNS/resolv из этого bootstrap, снимает пакеты, установленные
-                при обычной установке (в т.ч. amneziawg). Требует отдельное подтверждение.
-                Несовместимо с --no-start и --update-files-only.
+  --uninstall   Полное удаление того, что ставит этот bootstrap (юниты, конфиги, nginx, пакеты apt,
+                amneziawg). См. scripts/uninstall-awg-webui-bootstrap.sh. Ветку minimal снимайте
+                отдельно: scripts/remove-legacy-minimal-awg-uplink.sh
 
 EOF
 }
@@ -591,15 +482,11 @@ done
 
 [[ ${EUID:-0} -eq 0 ]] || die "run as root: sudo $0"
 if [[ $UNINSTALL -eq 1 ]]; then
-  [[ $UPDATE_FILES_ONLY -eq 0 && $NO_START -eq 0 ]] || die "--uninstall cannot be combined with --no-start or --update-files-only"
+  if [[ $UPDATE_FILES_ONLY -eq 1 || $NO_START -eq 1 ]]; then
+    die "--uninstall cannot be combined with --update-files-only or --no-start"
+  fi
+  exec bash "$ROOTDIR/scripts/uninstall-awg-webui-bootstrap.sh"
 fi
-if [[ $UNINSTALL -eq 1 ]]; then
-  [[ -d "$WEBUI_SRC" ]] || die "missing $WEBUI_SRC"
-  [[ -f "$ROOTDIR/scripts/remove-legacy-minimal-awg-uplink.sh" ]] || die "missing $ROOTDIR/scripts/remove-legacy-minimal-awg-uplink.sh"
-  run_awg_webui_uninstall
-  exit 0
-fi
-
 [[ -d "$WEBUI_SRC" ]] || die "missing $WEBUI_SRC"
 [[ -f "$LIB_SRC/awg-webui-iface-routing-apply.sh" ]] || die "missing iface script in lib/"
 [[ -f "$LIB_SRC/awg-uplink-geo-ip-refresh.py" ]] || die "missing geo ip refresh script in lib/"
