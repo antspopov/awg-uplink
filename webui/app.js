@@ -435,6 +435,19 @@ function setRouteModeStatus(mode, applied = true) {
   }
 }
 
+function isInterfaceConfigReady(cfg) {
+  if (!cfg || typeof cfg !== "object") return false;
+  return Boolean(String(cfg.egress_dev || "").trim() && String(cfg.egress_ip || "").trim());
+}
+
+function setInterfaceConfigGateLocked(locked) {
+  const gate = document.getElementById("ifaceConfigGate");
+  const overlay = document.getElementById("ifaceConfigGateOverlay");
+  if (!gate || !overlay) return;
+  gate.classList.toggle("is-locked", Boolean(locked));
+  overlay.classList.toggle("hidden", !locked);
+}
+
 async function refreshTunnelStatus(state = null) {
   try {
     const st = await fetchJson("/api/status/awg-uplink");
@@ -685,18 +698,37 @@ function hideReconnectNoticeBanner() {
   if (el) el.classList.add("hidden");
 }
 
-function renderMtprotoUsers(users) {
+/** Drop mtproto toggle pending entries once /api/mtproto/state matches expected enabled per user. */
+function reconcileMtprotoPendingToggles(users, pending) {
+  if (!pending || typeof pending !== "object") return;
+  const list = users || [];
+  for (const uname of Object.keys(pending)) {
+    const req = pending[uname];
+    if (!req || typeof req.enabled !== "boolean") continue;
+    const row = list.find((u) => String(u.username || "") === String(uname));
+    if (!row) continue;
+    if (Boolean(row.enabled) === Boolean(req.enabled)) {
+      delete pending[uname];
+    }
+  }
+}
+
+function renderMtprotoUsers(users, pendingToggles = {}) {
   const body = $("mtpUsersBody");
   body.innerHTML = "";
+  const enabledCount = users.filter((u) => Boolean(u && u.enabled)).length;
   for (const u of users) {
     const row = document.createElement("div");
     row.className = "mtp-user-item";
     const link = u.link || "";
-    const enabled = Boolean(u.enabled);
+    const pending = pendingToggles && pendingToggles[u.username || ""];
+    const baseEnabled = Boolean(u.enabled);
+    const enabled = pending ? Boolean(pending.enabled) : baseEnabled;
+    const lastActiveLock = baseEnabled && enabledCount <= 1;
     const sessions = Number(u.sessions || 0);
     const linkTme = u.link_tme || tgToTme(link);
     row.innerHTML = `
-      <button class="switch ${enabled ? "is-on" : ""}" data-toggle-user="${u.username || ""}" data-enabled="${enabled ? "1" : "0"}" type="button" title="${enabled ? "Выключить" : "Включить"}"></button>
+      <button class="switch ${enabled ? "is-on" : ""}" data-toggle-user="${u.username || ""}" data-enabled="${enabled ? "1" : "0"}" type="button" ${pending || lastActiveLock ? "disabled" : ""} title="${pending ? "Применяется..." : lastActiveLock ? "Нельзя выключить последнего активного пользователя" : enabled ? "Выключить" : "Включить"}"></button>
       <div class="mtp-user-main">
         <div class="mtp-user-name">${u.username || ""}</div>
         <div class="mtp-user-meta">secret: ${shortSecret(u.secret || "")}</div>
@@ -707,7 +739,7 @@ function renderMtprotoUsers(users) {
         <button class="mini-btn user-action" data-copy-link="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy tg://</button>
         <button class="mini-btn user-action" data-copy-tme="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy t.me</button>
         <button class="mini-btn user-action" data-edit-user="${u.username || ""}" type="button">✎</button>
-        <button class="mini-btn mini-btn--danger user-action" data-del-user="${u.username || ""}" type="button" title="Удалить">✕</button>
+        <button class="mini-btn mini-btn--danger user-action" data-del-user="${u.username || ""}" type="button" ${lastActiveLock ? "disabled" : ""} title="${lastActiveLock ? "Нельзя удалить последнего активного пользователя" : "Удалить"}">✕</button>
       </div>
     `;
     row.dataset.link = link;
@@ -754,7 +786,9 @@ async function refreshMtprotoState(state) {
     }
 
     const users = s.users || [];
-    renderMtprotoUsers(users);
+    const pending = state.mtprotoPendingToggles || {};
+    reconcileMtprotoPendingToggles(users, pending);
+    renderMtprotoUsers(users, pending);
     const usersCount = Number(s.users_total ?? users.length);
     const sessionsOpen = Number(s.sessions_total ?? users.reduce((acc, u) => acc + Number(u.sessions || 0), 0));
     const sessionsCap = Number(s.sessions_cap ?? usersCount * 9);
@@ -1042,6 +1076,7 @@ function initMtprotoPanel(state) {
   const mtpDeleteText = $("mtpDeleteUserConfirmText");
   let resolveDeleteConfirm = null;
   const mtpWarnOverlay = $("mtpInstallWarnOverlay");
+  const pendingToggles = (state.mtprotoPendingToggles = state.mtprotoPendingToggles || {});
   const closeMtpWarn = () => {
     mtpWarnOverlay.classList.add("hidden");
     mtpWarnOverlay.setAttribute("aria-hidden", "true");
@@ -1230,13 +1265,22 @@ function initMtprotoPanel(state) {
     }
     if (toggleUser) {
       const enabledNow = t.getAttribute("data-enabled") === "1";
+      const targetEnabled = !enabledNow;
+      pendingToggles[toggleUser] = { enabled: targetEnabled };
+      if (state.mtproto && Array.isArray(state.mtproto.users)) {
+        renderMtprotoUsers(state.mtproto.users, pendingToggles);
+      }
       try {
-        await withBusyOverlay("Обновляем статус пользователя MTProto…", async () => {
-          await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: !enabledNow });
-        });
-        await refreshMtprotoState(state); // immediate refresh
+        await postJson("/api/mtproto/users/toggle", { username: toggleUser, enabled: targetEnabled });
         toast(enabledNow ? "Пользователь выключен." : "Пользователь включен.", "ok");
+        await refreshMtprotoState(state);
+        for (let i = 0; i < 12 && pendingToggles[toggleUser]; i++) {
+          await sleepMs(120);
+          await refreshMtprotoState(state);
+        }
       } catch {
+        delete pendingToggles[toggleUser];
+        await refreshMtprotoState(state);
         setStatusById("mtprotoUsersStatus", "dot--bad", "ошибка переключения");
         toast("Ошибка переключения пользователя.", "error", 2200);
       }
@@ -1299,6 +1343,8 @@ async function initNetworkForm(state) {
   try {
     const saved = await fetchJson("/api/net/routing-config");
     const cfg = saved && saved.config ? saved.config : {};
+    state.interfaceConfigReady = isInterfaceConfigReady(cfg);
+    setInterfaceConfigGateLocked(!state.interfaceConfigReady);
     if (cfg.egress_dev) {
       $("egressDev").value = cfg.egress_dev;
       $("egressDev").dispatchEvent(new Event("change"));
@@ -1338,6 +1384,8 @@ async function initNetworkForm(state) {
     refreshInterfaceStatuses(saved && saved.runtime ? saved.runtime : null);
   } catch {
     commitSavedGeoFingerprint(state, state.geo);
+    state.interfaceConfigReady = false;
+    setInterfaceConfigGateLocked(true);
   }
 }
 
@@ -1400,6 +1448,10 @@ function initInterfaceSave() {
       } else if (window.__awgState) {
         commitSavedGeoFingerprint(window.__awgState, window.__awgState.geo);
       }
+      if (window.__awgState) {
+        window.__awgState.interfaceConfigReady = isInterfaceConfigReady(res && res.config ? res.config : body);
+      }
+      setInterfaceConfigGateLocked(!(window.__awgState && window.__awgState.interfaceConfigReady));
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
@@ -2022,7 +2074,9 @@ async function main() {
     prevCpu: null,
     prevNet: null,
     mtproto: null,
+    mtprotoPendingToggles: {},
     tunnelUp: false,
+    interfaceConfigReady: false,
     routeMode: "egress",
     persistedRouteMode: "egress",
     savedGeoFingerprint: "",
@@ -2068,6 +2122,7 @@ async function main() {
   initDnsPanel();
   initInterfaceSave();
   initNetplanEditor();
+  setInterfaceConfigGateLocked(true);
 
   await initNetworkForm(state);
   await refreshTunnelStatus(state);

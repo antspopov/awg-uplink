@@ -2771,7 +2771,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             new_cfg = _replace_access_users_section(cfg_text, users)
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
-            return self._send_json(200, {"ok": True})
+            svc = self._mtproto_service_name()
+            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
+            if rc != 0:
+                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
+            return self._send_json(200, {"ok": True, "service_action": "restart"})
 
         if sp == "/api/mtproto/users/toggle":
             if self._auth_enabled and not self._session_user():
@@ -2785,6 +2789,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cfg_text = _read_text(cfg_path, "")
             users = _extract_access_users(cfg_text)
             disabled_users = _extract_disabled_users(cfg_text)
+            if not enabled and username in users and len(users) <= 1:
+                return self._send_text(400, "Нельзя выключить последнего активного пользователя MTProto.")
             if enabled:
                 if username in disabled_users:
                     users[username] = disabled_users.pop(username)
@@ -2794,7 +2800,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             new_cfg = _replace_access_users_section(cfg_text, users)
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
-            return self._send_json(200, {"ok": True})
+            svc = self._mtproto_service_name()
+            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
+            if rc != 0:
+                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
+            return self._send_json(200, {"ok": True, "service_action": "restart"})
 
         if sp == "/api/mtproto/users/delete":
             if self._auth_enabled and not self._session_user():
@@ -2807,12 +2817,18 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cfg_text = _read_text(cfg_path, "")
             users = _extract_access_users(cfg_text)
             disabled_users = _extract_disabled_users(cfg_text)
+            if username in users and len(users) <= 1:
+                return self._send_text(400, "Нельзя удалить последнего активного пользователя MTProto.")
             users.pop(username, None)
             disabled_users.pop(username, None)
             new_cfg = _replace_access_users_section(cfg_text, users)
             new_cfg = _replace_disabled_users_section(new_cfg, disabled_users)
             _write_text(cfg_path, new_cfg)
-            return self._send_json(200, {"ok": True})
+            svc = self._mtproto_service_name()
+            rc, out, err = _run(["systemctl", "restart", svc], timeout=20.0)
+            if rc != 0:
+                return self._send_text(500, (err or out or "failed to restart mtproto service").strip())
+            return self._send_json(200, {"ok": True, "service_action": "restart"})
 
         return self._send_text(404, "Not Found")
 

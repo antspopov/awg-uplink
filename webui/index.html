@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>awg-uplink — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260508-2" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-1" />
   </head>
   <body>
     <div class="app">
@@ -190,6 +190,7 @@
             </div>
           </div>
 
+          <div id="ifaceConfigGate" class="iface-config-gate">
           <div class="panel-sep"></div>
 
           <div class="panel-head">
@@ -546,6 +547,12 @@
             </div>
           </div>
           </div>
+          <div class="iface-config-gate__overlay hidden" id="ifaceConfigGateOverlay">
+            <div class="iface-config-gate__overlay-text">
+              Сначала заполните и сохраните «Настройка интерфейсов». До этого остальные разделы недоступны.
+            </div>
+          </div>
+          </div>
         </section>
       </main>
 
@@ -757,7 +764,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20260508-7"></script>
+    <script src="./app.js?v=20260509-1"></script>
   </body>
 </html>
 
