@@ -1068,8 +1068,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         rc, out, err = _run(["systemctl", "start", "awg-uplink-dns-refresh.service"], timeout=180.0)
         if rc != 0:
             raise RuntimeError((err or out or "awg-uplink-dns-refresh.service failed").strip())
-        _run(["systemctl", "enable", "awg-uplink-firewall.service"], timeout=3.0)
-        _run(["systemctl", "start", "awg-uplink-firewall.service"], timeout=30.0)
+        self._restart_awg_uplink_firewall()
         _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
         _run(["systemctl", "enable", "awg-uplink-amnezia-dns-watch.service"], timeout=3.0)
@@ -1394,6 +1393,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _run(["systemctl", "disable", "dnscrypt-proxy.socket"], timeout=5.0)
         _run(["systemctl", "stop", "dnscrypt-proxy.socket"], timeout=5.0)
 
+    def _restart_awg_uplink_firewall(self) -> None:
+        """Одноразовый unit с RemainAfterExit=yes: повторный `start` не запускает apply — нужен `restart`."""
+        _run(["systemctl", "enable", "awg-uplink-firewall.service"], timeout=3.0)
+        _run(["systemctl", "restart", "awg-uplink-firewall.service"], timeout=30.0)
+
     def _apply_iface_routing(self):
         self._install_iface_runtime()
         _run(["systemctl", "daemon-reload"], timeout=3.0)
@@ -1401,7 +1405,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         rc, out, err = _run(["systemctl", "restart", "awg-webui-ifaces.service"], timeout=5.0)
         if rc != 0:
             raise RuntimeError((err or out or "failed to restart awg-webui-ifaces.service").strip())
-        _run(["systemctl", "start", "awg-uplink-firewall.service"], timeout=30.0)
+        self._restart_awg_uplink_firewall()
         _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
 
