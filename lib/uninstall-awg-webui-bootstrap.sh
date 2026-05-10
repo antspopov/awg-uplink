@@ -49,7 +49,7 @@ cat <<EOF >&2
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║  ВНИМАНИЕ: полное удаление стека AWG Web UI bootstrap                    ║
 ║  Остановятся сервисы, удалятся конфиги, /opt/awg-uplink, MTProto, nginx.   ║
-║  Будут сняты пакеты: nginx, dnsmasq, dnscrypt-proxy, nftables, certbot,   ║
+║  Будут сняты пакеты: nginx, dnsmasq, dnscrypt-proxy, nftables, ufw, certbot, ║
 ║  amneziawg и др. (см. список в скрипте) — это может сломать чужие сервисы. ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -163,6 +163,11 @@ if [[ -n "$LE_DOMAIN" ]] && command -v certbot >/dev/null 2>&1; then
 	certbot delete --cert-name "$LE_DOMAIN" --non-interactive 2>/dev/null || true
 fi
 
+log "снятие правил файрвола панели (UFW, метка awg-web-ui-fw) и legacy nft awg_webui_fw…"
+if [[ -x /usr/local/sbin/awg-uplink-firewall-apply.py ]]; then
+	AWG_FW_ENABLED=0 AWG_WEBUI_CFG_DIR="$CFG_DIR" python3 /usr/local/sbin/awg-uplink-firewall-apply.py 2>/dev/null || true
+fi
+
 log "удаление каталогов приложения и MTProto"
 rm -rf -- /opt/mtproto-proxy /opt/awg-uplink "$CFG_DIR" /var/lib/awg-uplink-webui
 rm -f -- "$WG_CONF"
@@ -246,6 +251,7 @@ if command -v apt-get >/dev/null 2>&1; then
 		iproute2
 		netplan.io
 		nftables
+		ufw
 		dnsmasq
 		dnscrypt-proxy
 		curl

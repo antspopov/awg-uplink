@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply interface-panel firewall (nft awg_webui_fw or UFW rules)
+Description=Apply interface-panel firewall rules (UFW, tagged awg-web-ui-fw)
 After=network-online.target awg-webui-ifaces.service
 Wants=network-online.target
 

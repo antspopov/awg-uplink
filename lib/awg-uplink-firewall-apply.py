@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Брандмауэр панели «интерфейсы»: nftables (по умолчанию) или UFW (удобнее смотреть `ufw status`).
+"""Файрвол панели «интерфейсы» только через UFW.
 
-Геороутинг / DNS-transport-lock и др. по-прежнему используют свои nft-таблицы — только таблица
-inet awg_webui_fw или набор правил UFW с маркером awg-web-ui-fw.
+Добавляет и снимает **только** правила с comment `awg-web-ui-fw` — чужие правила UFW (другие порты) не трогает.
+При выключении (AWG_FW_ENABLED=0) снимает все помеченные правила и удаляет устаревшую nft-таблицу inet awg_webui_fw (наследие старых версий).
+
+Georouting / DNS-transport-lock остаются на своих nft-таблицах.
 
 Порты: interfaces.json → firewall (fallback — dns.json).
-Бэкенд: interfaces.env AWG_FW_BACKEND=nft|ufw (пишет Web UI) или переменная окружения."""
+Включение: interfaces.env AWG_FW_ENABLED=1|0 (по умолчанию 1). Переменные окружения имеют приоритет над файлом."""
 from __future__ import annotations
 
 import json
@@ -14,14 +16,13 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 CFG = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui"))
 ENV_FILE = CFG / "interfaces.env"
 IFACE_JSON = CFG / "interfaces.json"
 DNS_JSON = CFG / "dns.json"
-NFT_TABLE = "awg_webui_fw"
+NFT_TABLE_LEGACY = "awg_webui_fw"
 AWG_IFACE = os.environ.get("AWG_FW_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
 UFW_MARKER = "awg-web-ui-fw"
 
@@ -41,8 +42,10 @@ def parse_env(path: Path) -> dict[str, str]:
     return out
 
 
-def nft_escape(name: str) -> str:
-    return name.replace("\\", "\\\\").replace('"', '\\"')
+def env_flag_true(key: str, env: dict, *, default: str = "1") -> bool:
+    """Переменная окружения перекрывает значение из interfaces.env (удобно для uninstall)."""
+    raw = (os.environ.get(key) or env.get(key, default) or default).strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
 
 
 def load_fw_ports() -> tuple[list[int], list[int]]:
@@ -74,8 +77,12 @@ def load_fw_ports() -> tuple[list[int], list[int]]:
     return eg, ing
 
 
+def nft_delete_legacy_table() -> None:
+    subprocess.run(["nft", "delete", "table", "inet", NFT_TABLE_LEGACY], capture_output=True)
+
+
 def ufw_purge_marker() -> None:
-    """Удаляет только правила с нашим comment (не трогает чужие правила UFW)."""
+    """Удаляет только правила с comment awg-web-ui-fw (остальные правила UFW не изменяет)."""
     if not shutil.which("ufw"):
         return
     for _ in range(256):
@@ -102,7 +109,6 @@ def ufw_is_active() -> bool:
 
 
 def ufw_add(rule_args: list[str]) -> bool:
-    """rule_args: например ['allow', 'in', 'on', 'eth0', ...] — без префикса ufw."""
     proc = subprocess.run(["ufw", *rule_args], capture_output=True, text=True)
     if proc.returncode != 0:
         sys.stderr.write(f"[awg-uplink-firewall] ufw {' '.join(rule_args)} failed: {proc.stderr or proc.stdout}\n")
@@ -110,81 +116,20 @@ def ufw_add(rule_args: list[str]) -> bool:
     return True
 
 
-def apply_nft(
+def apply_ufw_panel(
     egress: str,
     ing_en: bool,
     ingress: str,
     eg_ports: list[int],
     ing_ports: list[int],
 ) -> None:
-    ufw_purge_marker()
-    subprocess.run(["nft", "delete", "table", "inet", NFT_TABLE], capture_output=True)
-    if not egress:
-        return
-
-    lines = [
-        f"table inet {NFT_TABLE} {{",
-        "  chain input {",
-        "    type filter hook input priority 55; policy accept;",
-        "    ct state established,related accept",
-        "    iif lo accept",
-        f'    iifname "{nft_escape(AWG_IFACE)}" ct state new counter drop',
-    ]
-
-    distinct_ingress = ing_en and ingress and ingress != egress
-    union_fw_ports = bool(egress and ingress and ingress == egress)
-
-    if distinct_ingress:
-        eg_ps = ", ".join(str(p) for p in eg_ports)
-        ing_ps = ", ".join(str(p) for p in ing_ports)
-        lines.append(f'    iifname "{nft_escape(egress)}" tcp dport {{ {eg_ps} }} ct state new counter accept')
-        lines.append(f'    iifname "{nft_escape(egress)}" ct state new counter drop')
-        lines.append(f'    iifname "{nft_escape(ingress)}" tcp dport {{ {ing_ps} }} ct state new counter accept')
-        lines.append(f'    iifname "{nft_escape(ingress)}" ct state new counter drop')
-    else:
-        if union_fw_ports:
-            ports = sorted(set(eg_ports) | set(ing_ports))
-        else:
-            ports = eg_ports
-        ps = ", ".join(str(p) for p in ports)
-        lines.append(f'    iifname "{nft_escape(egress)}" tcp dport {{ {ps} }} ct state new counter accept')
-        lines.append(f'    iifname "{nft_escape(egress)}" ct state new counter drop')
-
-    lines.extend(["  }", "}"])
-    nft_body = "\n".join(lines) + "\n"
-
-    with tempfile.NamedTemporaryFile("w", suffix=".nft", delete=False, encoding="utf-8") as tmp:
-        tmp.write(nft_body)
-        tmp_path = tmp.name
-    try:
-        subprocess.run(["nft", "-f", tmp_path], check=True)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def apply_ufw(
-    egress: str,
-    ing_en: bool,
-    ingress: str,
-    eg_ports: list[int],
-    ing_ports: list[int],
-) -> None:
-    subprocess.run(["nft", "delete", "table", "inet", NFT_TABLE], capture_output=True)
+    """Добавляет только помеченные правила; перед этим purge уже сделан снаружи."""
     if not shutil.which("ufw"):
-        sys.stderr.write("[awg-uplink-firewall] ufw не найден (apt install ufw); используется nft.\n")
-        apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
+        sys.stderr.write("[awg-uplink-firewall] пакет ufw не установлен (apt install ufw).\n")
         return
     if not ufw_is_active():
-        sys.stderr.write(
-            "[awg-uplink-firewall] AWG_FW_BACKEND=ufw, но UFW не активен (sudo ufw enable). Используется nft.\n"
-        )
-        apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
+        sys.stderr.write("[awg-uplink-firewall] UFW не активен — включите: sudo ufw enable. Правила панели не добавлены.\n")
         return
-
-    ufw_purge_marker()
     if not egress:
         return
 
@@ -215,7 +160,6 @@ def apply_ufw(
     def deny_in_on(dev: str) -> None:
         ufw_add(["deny", "in", "on", dev, "comment", UFW_MARKER])
 
-    # Сначала разрешения по TCP, затем запрет остального входящего на том же интерфейсе (как ct state new drop в nft).
     if distinct_ingress:
         allow_tcp_on(egress, eg_ports)
         deny_in_on(egress)
@@ -239,14 +183,15 @@ def main() -> None:
     ing_en = env.get("INGRESS_ENABLED", "0").strip() == "1"
     ingress = env.get("INGRESS_DEV", "").strip()
     eg_ports, ing_ports = load_fw_ports()
-    backend = (env.get("AWG_FW_BACKEND") or os.environ.get("AWG_FW_BACKEND") or "nft").strip().lower()
-    if backend not in ("nft", "ufw"):
-        backend = "nft"
+    enabled = env_flag_true("AWG_FW_ENABLED", env, default="1")
 
-    if backend == "ufw":
-        apply_ufw(egress, ing_en, ingress, eg_ports, ing_ports)
-    else:
-        apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
+    nft_delete_legacy_table()
+    ufw_purge_marker()
+
+    if not enabled:
+        return
+
+    apply_ufw_panel(egress, ing_en, ingress, eg_ports, ing_ports)
 
 
 if __name__ == "__main__":

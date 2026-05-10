@@ -555,9 +555,9 @@ if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
 fi
 
 if [[ $UPDATE_FILES_ONLY -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-  log "Installing dependencies (python3, iproute2, netplan.io, nftables, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
+  log "Installing dependencies (python3, iproute2, netplan.io, nftables, ufw, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables ufw dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
   dnsmasq_quarantine_bind_interfaces_snippets
 fi
 
@@ -698,6 +698,7 @@ if [[ ! -f "$CFG_DIR/dns.json" ]]; then
   "dnscrypt_server_names": ["cloudflare", "google"],
   "domains_list_updated_at": null,
   "firewall": {
+    "enabled": true,
     "egress_tcp_ports": [22],
     "ingress_tcp_ports": [22, 80, 443, 5000]
   },
