@@ -499,6 +499,44 @@ body::before {
     margin-top: 0;
     padding-top: 0;
   }
+
+  .interface-grid .interface-fw-card {
+    grid-column: 1 / -1;
+  }
+}
+
+.interface-fw-card .iface-fw-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 0 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.interface-fw-card .iface-fw-head-text {
+  min-width: 0;
+}
+
+.interface-fw-card .iface-fw-head-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.interface-fw-card .iface-fw-head-sub {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-top: 3px;
+}
+
+.interface-fw-card .iface-fw-help {
+  margin-top: 12px;
+}
+
+.interface-fw-card .toggle-switch.iface-fw-toggle {
+  cursor: pointer;
 }
 
 .card {
@@ -693,6 +731,10 @@ body::before {
   .row {
     grid-template-columns: 1fr 1fr;
   }
+
+  .row .field--full-width {
+    grid-column: 1 / -1;
+  }
 }
 
 .field label {
@@ -700,21 +742,6 @@ body::before {
   font-size: 12px;
   margin-bottom: 8px;
   color: rgba(255, 255, 255, 0.78);
-}
-
-.field label.iface-fw-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 500;
-  margin-bottom: 0;
-}
-
-.field label.iface-fw-toggle input {
-  width: auto;
-  margin-top: 2px;
-  flex-shrink: 0;
 }
 
 .field--spaced {

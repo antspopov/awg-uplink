@@ -99,32 +99,12 @@
               </div>
 
               <div class="row">
-                <div class="field">
+                <div class="field field--full-width">
                   <label>Шлюз (IPv4)</label>
                   <input id="egressGw" type="text" placeholder="например: 192.0.2.1" />
                   <div class="help">
                     Egress — основной выход в интернет с маршрутом по умолчанию.
                     Если шлюз не указан, будет использовано системное значение.
-                  </div>
-                </div>
-                <div class="field">
-                  <label>Разрешённые входящие TCP</label>
-                  <input id="ifaceFwEgressPorts" type="text" placeholder="22" />
-                  <div class="help">
-                    Новые входящие на egress разрешены только на указанных портах (остальное — drop). SSH по умолчанию 22.
-                  </div>
-                </div>
-              </div>
-
-              <div class="row">
-                <div class="field">
-                  <label class="iface-fw-toggle">
-                    <input type="checkbox" id="ifaceFwEnabled" checked />
-                    <span>Включить файрвол панели (UFW)</span>
-                  </label>
-                  <div class="help">
-                    Включено: при наличии пакета <code>ufw</code> — <code>ufw enable</code> и только правила с меткой <code>awg-web-ui-fw</code>. Выключено — снять эти правила и <code>ufw disable</code>. Без пакета <code>ufw</code> — те же ограничения через nft (<code>inet awg_webui_fw</code>).
-                    Georouting и DNS-lock по-прежнему на nftables.
                   </div>
                 </div>
               </div>
@@ -151,7 +131,7 @@
               </div>
 
               <div class="row">
-                <div class="field">
+                <div class="field field--full-width">
                   <label>Шлюз (IPv4)</label>
                   <input id="ingressGw" type="text" placeholder="например: 198.51.100.1" />
                   <div class="help">
@@ -160,13 +140,37 @@
                     возьмет на себя Egress интерфейс.
                   </div>
                 </div>
-                <div class="field">
-                  <label>Разрешённые входящие TCP</label>
-                  <input id="ifaceFwIngressPorts" type="text" placeholder="22, 443, 8080" />
-                  <div class="help">
-                    Когда ingress совпадает с egress, порты объединяются в одном правиле. Отдельная карточка ingress — только если выбран другой интерфейс/адрес.
-                  </div>
+              </div>
+            </div>
+
+            <div class="card interface-fw-card">
+              <div class="card-head">
+                <div class="card-title">Файрвол и порты</div>
+              </div>
+              <div class="iface-fw-head">
+                <div class="iface-fw-head-text">
+                  <div class="iface-fw-head-title">Файрвол панели</div>
+                  <div class="iface-fw-head-sub">UFW / nft — см. подсказку ниже</div>
                 </div>
+                <label class="toggle-switch iface-fw-toggle" title="Включить или выключить файрвол панели">
+                  <input type="checkbox" id="ifaceFwEnabled" role="switch" checked />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label for="ifaceFwEgressPorts">TCP на egress</label>
+                  <input id="ifaceFwEgressPorts" type="text" placeholder="22" />
+                </div>
+                <div class="field">
+                  <label for="ifaceFwIngressPorts">TCP на ingress</label>
+                  <input id="ifaceFwIngressPorts" type="text" placeholder="22, 443, 8080" />
+                </div>
+              </div>
+              <div class="help iface-fw-help">
+                Включено: при наличии <code>ufw</code> — <code>ufw enable</code> и только правила с меткой <code>awg-web-ui-fw</code>. Выключено — снять эти правила и <code>ufw disable</code>.
+                Без пакета <code>ufw</code> — те же ограничения через nft (<code>inet awg_webui_fw</code>). При совпадении egress и ingress порты объединяются.
+                Georouting и DNS-lock по-прежнему на nftables.
               </div>
             </div>
 
