@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Файрвол панели «интерфейсы»: предпочтительно UFW (правила с comment awg-web-ui-fw), иначе fallback на nftables (inet awg_webui_fw).
+"""Файрвол панели «интерфейсы».
 
-- UFW: только помеченные правила; чужие порты в UFW не трогаем.
-- nft: отдельная таблица inet awg_webui_fw (если нет ufw или UFW не active — см. stderr).
-При AWG_FW_ENABLED=0 снимаем помеченные правила UFW и удаляем таблицу awg_webui_fw.
+- Установлен **ufw**: при включённом переключателе панели — `ufw --force enable` и только правила с
+  comment `awg-web-ui-fw` (остальные записи UFW не трогаем). При **выключенном** переключателе —
+  снять помеченные правила, удалить таблицу `inet awg_webui_fw`, **`ufw --force disable`**.
+- **Без пакета ufw** — те же ограничения через nftables (`inet awg_webui_fw`); переключатель «выкл»
+  только снимает эту таблицу.
 
-Georouting / DNS-transport-lock остаются на своих nft-таблицах.
+Georouting / DNS-transport-lock — отдельные nft-таблицы.
 
 Порты: interfaces.json → firewall (fallback — dns.json).
-Включение: interfaces.env AWG_FW_ENABLED=1|0 (по умолчанию 1). Переменные окружения имеют приоритет над файлом."""
+AWG_FW_ENABLED в interfaces.env (по умолчанию 1); переменные окружения перекрывают файл."""
 from __future__ import annotations
 
 import json
@@ -45,7 +47,6 @@ def parse_env(path: Path) -> dict[str, str]:
 
 
 def env_flag_true(key: str, env: dict, *, default: str = "1") -> bool:
-    """Переменная окружения перекрывает значение из interfaces.env (удобно для uninstall)."""
     raw = (os.environ.get(key) or env.get(key, default) or default).strip().lower()
     return raw not in ("0", "false", "no", "off", "")
 
@@ -88,7 +89,7 @@ def nft_escape(name: str) -> str:
 
 
 def ufw_purge_marker() -> None:
-    """Удаляет только правила с comment awg-web-ui-fw (остальные правила UFW не изменяет)."""
+    """Удаляет только правила с comment awg-web-ui-fw."""
     if not shutil.which("ufw"):
         return
     for _ in range(256):
@@ -114,6 +115,24 @@ def ufw_is_active() -> bool:
     return "status: active" in s
 
 
+def ufw_force_enable() -> bool:
+    if not shutil.which("ufw"):
+        return False
+    if ufw_is_active():
+        return True
+    proc = subprocess.run(["ufw", "--force", "enable"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(f"[awg-uplink-firewall] ufw --force enable failed: {proc.stderr or proc.stdout}\n")
+        return False
+    return True
+
+
+def ufw_force_disable() -> None:
+    if not shutil.which("ufw"):
+        return
+    subprocess.run(["ufw", "--force", "disable"], capture_output=True, text=True)
+
+
 def ufw_add(rule_args: list[str]) -> bool:
     proc = subprocess.run(["ufw", *rule_args], capture_output=True, text=True)
     if proc.returncode != 0:
@@ -129,7 +148,7 @@ def apply_nft(
     eg_ports: list[int],
     ing_ports: list[int],
 ) -> None:
-    """Fallback: цепочка input priority 55, как раньше (не трогает чужие nft-таблицы)."""
+    """Если пакета ufw нет — ограничения через nft (отдельная таблица)."""
     if not shutil.which("nft"):
         sys.stderr.write("[awg-uplink-firewall] nft не найден — файрвол панели не применён.\n")
         return
@@ -187,7 +206,6 @@ def apply_ufw_panel(
     eg_ports: list[int],
     ing_ports: list[int],
 ) -> None:
-    """Только помеченные правила UFW; вызывать если ufw установлен и active."""
     if not egress:
         return
 
@@ -243,21 +261,24 @@ def main() -> None:
     eg_ports, ing_ports = load_fw_ports()
     enabled = env_flag_true("AWG_FW_ENABLED", env, default="1")
 
+    if not enabled:
+        nft_delete_table()
+        ufw_purge_marker()
+        ufw_force_disable()
+        return
+
     nft_delete_table()
     ufw_purge_marker()
 
-    if not enabled:
-        return
-
-    if shutil.which("ufw") and ufw_is_active():
+    if shutil.which("ufw"):
+        if not ufw_force_enable():
+            sys.stderr.write("[awg-uplink-firewall] не удалось включить UFW — fallback на nftables.\n")
+            apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
+            return
         apply_ufw_panel(egress, ing_en, ingress, eg_ports, ing_ports)
-        return
-
-    if not shutil.which("ufw"):
-        sys.stderr.write("[awg-uplink-firewall] ufw не установлен — fallback на nftables (inet awg_webui_fw).\n")
     else:
-        sys.stderr.write("[awg-uplink-firewall] UFW не active — fallback на nftables (inet awg_webui_fw). Включите: sudo ufw enable.\n")
-    apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
+        sys.stderr.write("[awg-uplink-firewall] пакет ufw не установлен — правила панели через nftables.\n")
+        apply_nft(egress, ing_en, ingress, eg_ports, ing_ports)
 
 
 if __name__ == "__main__":
