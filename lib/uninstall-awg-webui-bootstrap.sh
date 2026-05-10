@@ -184,7 +184,8 @@ rm -f -- \
 	/usr/local/sbin/awg-uplink-amnezia-dns-watch.py \
 	/usr/local/sbin/awg-uplink-dns-transport-lock.py \
 	/usr/local/sbin/awg-uplink-firewall-apply.py \
-	/usr/local/sbin/awg-mtproto-install.sh
+	/usr/local/sbin/awg-mtproto-install.sh \
+	/usr/local/sbin/awg-webui-self-update.sh
 
 log "nginx: сайт Web UI и самоподписанные сертификаты"
 rm -f -- "$NGINX_SITE_LINK" "$NGINX_SITE_PATH"

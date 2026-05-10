@@ -59,6 +59,17 @@ function basePath() {
   return (window.__AWG_BASE_PATH__ || "/").replace(/\/?$/, "/");
 }
 
+function applyAppVersionLabels(metricsVersion) {
+  const fromWindow =
+    typeof window.__AWG_APP_VERSION__ === "string" ? window.__AWG_APP_VERSION__.trim() : "";
+  const fromMetrics =
+    typeof metricsVersion === "string" && metricsVersion.trim() ? metricsVersion.trim() : "";
+  const v = fromMetrics || fromWindow;
+  const label = v ? `Версия ${v}` : "";
+  const foot = document.getElementById("footerAppVersion");
+  if (foot) foot.textContent = label;
+}
+
 /** Session expired or server restarted in-memory sessions — send user to login. */
 function redirectToWebUiLogin() {
   try {
@@ -290,6 +301,77 @@ function closeModal() {
   const ov = $("importModalOverlay");
   ov.classList.add("hidden");
   ov.setAttribute("aria-hidden", "true");
+}
+
+function initWebUiUpdateBanner() {
+  const overlay = $("webuiUpdateModalOverlay");
+  const applyBtn = $("webuiUpdateModalApplyBtn");
+  const blockedHint = $("webuiUpdateBlockedHint");
+
+  function syncApplyEnabled() {
+    const inf = window.__awgUpdateInfo || {};
+    const err = String(inf.checkError || "").trim();
+    const ok = Boolean(inf.canApply) && !err;
+    applyBtn.disabled = !ok;
+    const parts = [];
+    if (err) parts.push(`Проверка версии: ${err}`);
+    if (!inf.canApply && inf.blocked) parts.push(inf.blocked);
+    if (parts.length) {
+      blockedHint.textContent = parts.join(" ");
+      blockedHint.hidden = false;
+    } else {
+      blockedHint.textContent = "";
+      blockedHint.hidden = true;
+    }
+  }
+
+  function openWebUiUpdateModal() {
+    const inf = window.__awgUpdateInfo || {};
+    $("webuiUpdateCurrentVer").textContent = inf.current || "—";
+    $("webuiUpdateLatestVer").textContent = inf.latest || "—";
+    $("webuiUpdateRepoLabel").textContent = inf.repo || "—";
+    $("webuiUpdateBranchLabel").textContent = inf.branch || "main";
+    syncApplyEnabled();
+    overlay.classList.remove("hidden");
+    overlay.setAttribute("aria-hidden", "false");
+    applyBtn.focus();
+  }
+
+  function closeWebUiUpdateModal() {
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  $("updateNoticeDetailsBtn").addEventListener("click", openWebUiUpdateModal);
+  $("webuiUpdateModalCloseBtn").addEventListener("click", closeWebUiUpdateModal);
+  $("webuiUpdateModalCancelBtn").addEventListener("click", closeWebUiUpdateModal);
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target && ev.target.id === "webuiUpdateModalOverlay") closeWebUiUpdateModal();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !overlay.classList.contains("hidden")) closeWebUiUpdateModal();
+  });
+
+  $("webuiUpdateModalApplyBtn").addEventListener("click", async () => {
+    if (applyBtn.disabled) return;
+    closeWebUiUpdateModal();
+    try {
+      await withBusyOverlay("Загрузка и обновление (это может занять несколько минут)…", async () => {
+        await postJsonAwaitTask("/api/update/start", {}, 50 * 60 * 1000);
+      });
+      toast("Обновление завершено. Панель перезапускается…", "ok", 4500);
+      setTimeout(() => {
+        window.location.reload();
+      }, 6500);
+    } catch (e) {
+      const msg = String((e && e.message) || e || "ошибка");
+      if (/fetch|network|failed/i.test(msg)) {
+        toast("Соединение прервалось — если обновление уже шло, подождите и обновите страницу (F5).", "warn", 7000);
+      } else {
+        toast(msg, "err", 9000);
+      }
+    }
+  });
 }
 
 function initAmneziaSetupBanner() {
@@ -526,6 +608,28 @@ async function refreshSystemMetrics(state) {
 
     const notice = $("amneziaSetupNotice");
     notice.classList.toggle("hidden", m.amnezia_setup_banner !== true);
+
+    const updNotice = $("updateAvailableNotice");
+    const curV = m.update_current_version;
+    const latV = m.update_latest_version;
+    const updAvail =
+      m.update_check_enabled !== false &&
+      Boolean(m.update_available) &&
+      !(m.update_check_error && String(m.update_check_error).trim());
+    updNotice.classList.toggle("hidden", !updAvail);
+    if (updAvail) {
+      $("updateNoticeVersionBrief").textContent = `${curV || "?"} → ${latV || "?"}`;
+    }
+    window.__awgUpdateInfo = {
+      current: curV,
+      latest: latV,
+      repo: m.update_repo,
+      branch: m.update_branch,
+      canApply: Boolean(m.update_can_apply),
+      blocked: m.update_apply_blocked_reason || "",
+      checkError: m.update_check_error || "",
+    };
+    applyAppVersionLabels(m.update_current_version);
   } catch {
     // keep last values on temporary errors
   }
@@ -2249,8 +2353,10 @@ async function main() {
     $("logoutBtn").style.display = "none";
   }
 
+  applyAppVersionLabels("");
   initImportModal(state);
   initAmneziaSetupBanner();
+  initWebUiUpdateBanner();
   initMtprotoPanel(state);
   initDnsPanel();
   initInterfaceSave();

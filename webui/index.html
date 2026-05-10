@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AWG Split Gate — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260509-7" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-9" />
   </head>
   <body>
     <div class="app">
@@ -21,14 +21,23 @@
             <div class="subtitle">Веб‑интерфейс управления шлюзом</div>
           </div>
         </div>
-        <div id="amneziaSetupNotice" class="topbar-notice hidden" role="status" aria-live="polite">
-          <span class="topbar-notice__marker" aria-hidden="true"></span>
-          <span class="topbar-notice__text topbar-notice__text--blink">
-            Для полноценной работы сервиса установите на сервер <strong>AmneziaVPN</strong>.
-          </span>
-          <button class="btn btn--sm btn--ghost" type="button" id="amneziaSetupDetailsBtn">
-            Подробнее
-          </button>
+        <div class="topbar-mid">
+          <div id="amneziaSetupNotice" class="topbar-notice hidden" role="status" aria-live="polite">
+            <span class="topbar-notice__marker" aria-hidden="true"></span>
+            <span class="topbar-notice__text topbar-notice__text--blink">
+              Для полноценной работы сервиса установите на сервер <strong>AmneziaVPN</strong>.
+            </span>
+            <button class="btn btn--sm btn--ghost" type="button" id="amneziaSetupDetailsBtn">
+              Подробнее
+            </button>
+          </div>
+          <div id="updateAvailableNotice" class="topbar-notice topbar-notice--update hidden" role="status" aria-live="polite">
+            <span class="topbar-notice__marker" aria-hidden="true"></span>
+            <span class="topbar-notice__text">
+              Доступна новая версия панели: <strong id="updateNoticeVersionBrief">—</strong>
+            </span>
+            <button class="btn btn--sm btn--ghost" type="button" id="updateNoticeDetailsBtn">Подробнее</button>
+          </div>
         </div>
         <div class="topbar-right">
           <button class="btn" type="button" id="logoutBtn">Выйти</button>
@@ -577,7 +586,10 @@
       </main>
 
       <footer class="footer">
-        <div>AWG Split Gate</div>
+        <div class="footer-inner">
+          <span class="footer-brand">AWG Split Gate</span>
+          <span class="footer-version" id="footerAppVersion" aria-label="Версия панели"></span>
+        </div>
       </footer>
     </div>
 
@@ -614,6 +626,32 @@
         </div>
         <div class="modal-actions">
           <button class="btn btn--primary" id="amneziaSetupModalOkBtn" type="button">Понятно</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay hidden" id="webuiUpdateModalOverlay" aria-hidden="true">
+      <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-labelledby="webuiUpdateModalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="webuiUpdateModalTitle">Обновление панели</div>
+          <button class="icon-btn" id="webuiUpdateModalCloseBtn" type="button" aria-label="Закрыть">✕</button>
+        </div>
+        <div class="modal-body modal-body--prose">
+          <p>
+            С сервера будет загружен код ветки <code id="webuiUpdateBranchLabel">main</code> репозитория
+            <code id="webuiUpdateRepoLabel">—</code>, обновлены файлы панели и зависимости apt. Файл
+            <code>/etc/awg-uplink-webui/webui.env</code> (логин и пароль) и настройки nginx / сертификаты не перезаписываются.
+          </p>
+          <p class="modal-body__label">Версии</p>
+          <ul class="webui-update-version-list">
+            <li>Текущая: <strong id="webuiUpdateCurrentVer">—</strong></li>
+            <li>На GitHub: <strong id="webuiUpdateLatestVer">—</strong></li>
+          </ul>
+          <p class="muted" id="webuiUpdateBlockedHint" hidden></p>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" type="button" id="webuiUpdateModalCancelBtn">Отмена</button>
+          <button class="btn btn--primary" type="button" id="webuiUpdateModalApplyBtn">Обновить</button>
         </div>
       </div>
     </div>

@@ -489,7 +489,7 @@ dedupe_env_file() {
 
 usage() {
   cat <<EOF
-Usage: $0 [--no-start] [--update-files-only] [--uninstall]
+Usage: $0 [--no-start] [--update-files-only [--install-deps]] [--uninstall]
 
 Installs AWG Web UI runtime:
   - app files to $APP_DIR
@@ -501,17 +501,22 @@ Installs AWG Web UI runtime:
   --uninstall   Полное удаление того, что ставит этот bootstrap (юниты, конфиги, nginx, пакеты apt,
                 amneziawg). См. lib/uninstall-awg-webui-bootstrap.sh.
 
+  --update-files-only --install-deps   Вместе с копированием файлов: apt-get install зависимостей и ensure_amneziawg
+                (без смены webui.env, nginx и сертификатов).
+
 EOF
 }
 
 NO_START=0
 UPDATE_FILES_ONLY=0
+INSTALL_DEPS_ON_UPDATE=0
 UNINSTALL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --no-start) NO_START=1 ;;
     --update-files-only) UPDATE_FILES_ONLY=1 ;;
+    --install-deps) INSTALL_DEPS_ON_UPDATE=1 ;;
     --uninstall) UNINSTALL=1 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -519,6 +524,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ${EUID:-0} -eq 0 ]] || die "run as root: sudo $0"
+if [[ $INSTALL_DEPS_ON_UPDATE -eq 1 && $UPDATE_FILES_ONLY -ne 1 ]]; then
+  die "--install-deps requires --update-files-only"
+fi
 if [[ $UNINSTALL -eq 1 ]]; then
   if [[ $UPDATE_FILES_ONLY -eq 1 || $NO_START -eq 1 ]]; then
     die "--uninstall cannot be combined with --update-files-only or --no-start"
@@ -554,14 +562,14 @@ if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
   prompt_webui_settings
 fi
 
-if [[ $UPDATE_FILES_ONLY -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+if [[ $UPDATE_FILES_ONLY -eq 0 || $INSTALL_DEPS_ON_UPDATE -eq 1 ]] && command -v apt-get >/dev/null 2>&1; then
   log "Installing dependencies (python3, iproute2, netplan.io, nftables, ufw, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables ufw dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
   dnsmasq_quarantine_bind_interfaces_snippets
 fi
 
-if [[ $UPDATE_FILES_ONLY -eq 0 ]]; then
+if [[ $UPDATE_FILES_ONLY -eq 0 || $INSTALL_DEPS_ON_UPDATE -eq 1 ]]; then
 ensure_amneziawg
 fi
 
@@ -573,6 +581,10 @@ install -d -m 700 "$CFG_DIR"
 
 log "Installing webui files..."
 cp -a "$WEBUI_SRC/." "$APP_DIR/"
+
+if [[ -f "$ROOTDIR/VERSION" ]]; then
+  install -m 644 "$ROOTDIR/VERSION" "$APP_ROOT/VERSION"
+fi
 
 log "Installing runtime source files..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" "$APP_ROOT/lib/awg-webui-iface-routing-apply.sh"
@@ -606,6 +618,7 @@ install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" /usr/local/sbin/awg-up
 install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" /usr/local/sbin/awg-uplink-dns-transport-lock.py
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" /usr/local/sbin/awg-uplink-firewall-apply.py
 install -m 755 "$LIB_SRC/awg-mtproto-install.sh" /usr/local/sbin/awg-mtproto-install.sh
+install -m 755 "$LIB_SRC/awg-webui-self-update.sh" /usr/local/sbin/awg-webui-self-update.sh
 
 log "Installing systemd units..."
 install -m 644 "$SYSTEMD_SRC/$WEBUI_SERVICE" "/etc/systemd/system/$WEBUI_SERVICE"
@@ -626,9 +639,9 @@ install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscry
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
   systemctl daemon-reload
-  log "Restarting web UI service..."
-  systemctl restart "$WEBUI_SERVICE"
-  systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true
+  # Отложенный restart: иначе процесс webui, запустивший bootstrap, оборвётся до завершения HTTP-операции.
+  log "Scheduling web UI service restart in 4s..."
+  nohup bash -c "sleep 4; systemctl restart ${WEBUI_SERVICE}" </dev/null >/dev/null 2>&1 &
   log "Update-only completed."
   exit 0
 fi

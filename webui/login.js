@@ -151,7 +151,15 @@ function nextTarget() {
   return basePath();
 }
 
+function applyLoginPageVersion() {
+  const el = document.getElementById("loginPageVersion");
+  if (!el) return;
+  const v = typeof window.__AWG_APP_VERSION__ === "string" ? window.__AWG_APP_VERSION__.trim() : "";
+  el.textContent = v ? `Версия ${v}` : "";
+}
+
 async function main() {
+  applyLoginPageVersion();
   const help = $("loginHelp");
   const btn = $("loginBtn");
 

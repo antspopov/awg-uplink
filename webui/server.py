@@ -101,6 +101,36 @@ def _run(cmd: list[str], timeout: float = 2.5) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
+def _semver_tuple(s: str) -> tuple[int, int, int]:
+    t = (s or "").strip().lower().lstrip("v")
+    if not t:
+        return (0, 0, 0)
+    chunk = t.split("-", 1)[0].strip()
+    parts = chunk.split(".")
+    nums: list[int] = []
+    for p in parts[:3]:
+        acc = ""
+        for ch in p:
+            if ch.isdigit():
+                acc += ch
+            else:
+                break
+        nums.append(int(acc) if acc else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2])
+
+
+def _semver_gt(a: str, b: str) -> bool:
+    return _semver_tuple(a) > _semver_tuple(b)
+
+
+def _http_get_text(url: str, timeout: float = 8.0) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "awg-uplink-webui-update/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace").strip()
+
+
 def _reload_or_restart_service(unit: str, reload_timeout: float = 8.0, restart_timeout: float = 20.0) -> tuple[int, str, str, str]:
     """
     Try systemctl reload first to avoid short connection drops,
@@ -149,6 +179,15 @@ def _read_text(path: str, default: str = "") -> str:
         return default
 
 
+def _read_installed_app_version() -> str:
+    """Single-line semver from /opt/awg-uplink/VERSION (next to webui/)."""
+    p = Path(__file__).resolve().parent.parent / "VERSION"
+    raw = _read_text(str(p), "").strip()
+    if raw:
+        return raw.splitlines()[0].strip()
+    return "0.0.0"
+
+
 def _write_text(path: str, data: str):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -178,6 +217,10 @@ _MTPROTO_INSTALL_STATE: dict = {
 
 _ASYNC_OPS_LOCK = threading.Lock()
 _ASYNC_OPS: dict[str, dict] = {}
+
+_UPDATE_CHECK_LOCK = threading.Lock()
+_UPDATE_CHECK_CACHE: dict[str, tuple[float, dict]] = {}
+_UPDATE_CHECK_TTL_SEC = 120.0
 
 
 def _sanitize_tunnel_config(cfg_text: str) -> str:
@@ -1658,6 +1701,107 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             },
         )
 
+    def _app_root_dir(self) -> Path:
+        return Path(__file__).resolve().parent.parent
+
+    def _update_repo_and_branch(self) -> tuple[str, str]:
+        repo = (os.environ.get("AWG_UI_UPDATE_REPO") or "antspopov/awg-uplink").strip()
+        if "/" not in repo:
+            repo = "antspopov/awg-uplink"
+        br = (os.environ.get("AWG_UI_UPDATE_BRANCH") or "main").strip() or "main"
+        return repo, br
+
+    def _update_checks_enabled(self) -> bool:
+        return _env_bool("AWG_UI_UPDATE_CHECK", True)
+
+    def _read_local_version(self) -> str:
+        return _read_installed_app_version()
+
+    def _compute_update_info_uncached(self) -> dict:
+        repo, branch = self._update_repo_and_branch()
+        out: dict = {
+            "update_check_enabled": self._update_checks_enabled(),
+            "update_repo": repo,
+            "update_branch": branch,
+            "update_current_version": self._read_local_version(),
+            "update_latest_version": "",
+            "update_available": False,
+            "update_check_error": "",
+            "update_can_apply": os.geteuid() == 0 and Path("/usr/local/sbin/awg-webui-self-update.sh").is_file(),
+            "update_apply_blocked_reason": "",
+        }
+        if not out["update_check_enabled"]:
+            out["update_apply_blocked_reason"] = "Проверка обновлений отключена (AWG_UI_UPDATE_CHECK)."
+            return out
+        if os.geteuid() != 0:
+            out["update_apply_blocked_reason"] = "Сервис не запущен от root — обновление из панели недоступно."
+        elif not Path("/usr/local/sbin/awg-webui-self-update.sh").is_file():
+            out["update_apply_blocked_reason"] = "Не установлен awg-webui-self-update.sh (нужен bootstrap)."
+        url = f"https://raw.githubusercontent.com/{repo}/{branch}/VERSION"
+        try:
+            remote = _http_get_text(url, timeout=10.0).splitlines()[0].strip()
+            out["update_latest_version"] = remote
+            cur = out["update_current_version"]
+            if remote and _semver_gt(remote, cur):
+                out["update_available"] = True
+        except Exception as ex:
+            out["update_check_error"] = str(ex)[:500]
+        return out
+
+    def _compute_update_info(self, use_cache: bool = True) -> dict:
+        repo, branch = self._update_repo_and_branch()
+        key = f"{repo.strip().lower()}:{branch.strip().lower()}"
+        now = time.monotonic()
+        with _UPDATE_CHECK_LOCK:
+            if use_cache:
+                ent = _UPDATE_CHECK_CACHE.get(key)
+                if isinstance(ent, tuple) and len(ent) == 2:
+                    ts, data = ent
+                    if now - ts < _UPDATE_CHECK_TTL_SEC and isinstance(data, dict):
+                        return dict(data)
+        data = self._compute_update_info_uncached()
+        with _UPDATE_CHECK_LOCK:
+            _UPDATE_CHECK_CACHE[key] = (now, dict(data))
+        return data
+
+    def _async_op_name_running(self, name: str) -> bool:
+        with _ASYNC_OPS_LOCK:
+            for st in _ASYNC_OPS.values():
+                if st.get("name") == name and st.get("running") is True:
+                    return True
+        return False
+
+    def _op_webui_self_update(self, body: dict) -> dict:
+        if os.geteuid() != 0:
+            raise RuntimeError("Требуется запуск webui от root.")
+        script = "/usr/local/sbin/awg-webui-self-update.sh"
+        if not Path(script).is_file():
+            raise RuntimeError("Отсутствует /usr/local/sbin/awg-webui-self-update.sh")
+        info = self._compute_update_info(use_cache=False)
+        if not info.get("update_check_enabled", True):
+            raise RuntimeError("Проверка обновлений отключена.")
+        if not info.get("update_available"):
+            raise RuntimeError("Нет доступной новой версии.")
+        repo = str(info.get("update_repo") or "antspopov/awg-uplink")
+        branch = str(info.get("update_branch") or "main")
+        env = os.environ.copy()
+        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+        p = subprocess.run(
+            ["/bin/bash", script, repo, branch],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            env=env,
+        )
+        if p.returncode != 0:
+            tail = ((p.stderr or "") + "\n" + (p.stdout or "")).strip()
+            tail = tail[-8000:]
+            raise RuntimeError(tail or f"self-update exit {p.returncode}")
+        with _UPDATE_CHECK_LOCK:
+            _UPDATE_CHECK_CACHE.clear()
+        nv = self._read_local_version()
+        return {"ok": True, "repo": repo, "branch": branch, "installed_version": nv}
+
     def _api_metrics_system(self):
         # CPU snapshot from /proc/stat
         stat = _read_text("/proc/stat", "")
@@ -1713,25 +1857,26 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         uptime_sec = int(float(uptime_raw[0])) if len(uptime_raw) > 0 else 0
 
         stack = self._amnezia_vpn_stack_present()
-        return self._send_json(
-            200,
-            {
-                "ts": int(time.time()),
-                "cpu_total": cpu_total,
-                "cpu_idle": cpu_idle,
-                "cpu_count": os.cpu_count() or 0,
-                "mem_total_kb": mem_total_kb,
-                "mem_avail_kb": mem_avail_kb,
-                "net_rx_bytes": rx_total,
-                "net_tx_bytes": tx_total,
-                "load1": load1,
-                "load5": load5,
-                "load15": load15,
-                "uptime_sec": uptime_sec,
-                # Web UI: баннер установки Amnezia, если нет Docker/демона или нет типичного стека контейнеров Amnezia
-                "amnezia_setup_banner": not stack,
-            },
-        )
+        upd = self._compute_update_info()
+        payload = {
+            "ts": int(time.time()),
+            "cpu_total": cpu_total,
+            "cpu_idle": cpu_idle,
+            "cpu_count": os.cpu_count() or 0,
+            "mem_total_kb": mem_total_kb,
+            "mem_avail_kb": mem_avail_kb,
+            "net_rx_bytes": rx_total,
+            "net_tx_bytes": tx_total,
+            "load1": load1,
+            "load5": load5,
+            "load15": load15,
+            "uptime_sec": uptime_sec,
+            # Web UI: баннер установки Amnezia, если нет Docker/демона или нет типичного стека контейнеров Amnezia
+            "amnezia_setup_banner": not stack,
+        }
+        for k, v in upd.items():
+            payload[k] = v
+        return self._send_json(200, payload)
 
     def _mtproto_config_path(self) -> str:
         return os.environ.get("AWG_MTPROTO_CONFIG", "/opt/mtproto-proxy/config.toml")
@@ -2499,10 +2644,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript; charset=utf-8")
             self.end_headers()
+            app_ver = _read_installed_app_version()
             self.wfile.write(
                 (
                     f'window.__AWG_BASE_PATH__ = {json.dumps(self._base_path)};\n'
                     f'window.__AWG_AUTH_ENABLED__ = {json.dumps(bool(self._auth_enabled))};\n'
+                    f'window.__AWG_APP_VERSION__ = {json.dumps(app_ver)};\n'
                 ).encode("utf-8")
             )
             return
@@ -2971,6 +3118,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 200,
                 {"ok": True, "service_action": "restart", "restart_deferred": True},
             )
+
+        if sp == "/api/update/start":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            if self._async_op_name_running("webui-self-update"):
+                return self._send_text(409, "Update already running")
+            body = self._read_json_body()
+            if not isinstance(body, dict):
+                body = {}
+            task_id = self._start_async_op("webui-self-update", lambda: self._op_webui_self_update(body))
+            return self._send_json(202, {"ok": True, "task_id": task_id})
 
         return self._send_text(404, "Not Found")
 
