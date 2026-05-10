@@ -639,9 +639,15 @@ install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscry
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
   systemctl daemon-reload
-  # Отложенный restart: иначе процесс webui, запустивший bootstrap, оборвётся до завершения HTTP-операции.
-  log "Scheduling web UI service restart in 4s..."
-  nohup bash -c "sleep 4; systemctl restart ${WEBUI_SERVICE}" </dev/null >/dev/null 2>&1 &
+  if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
+    # Только когда bootstrap дергает сам awg-uplink-webui (self-update из панели): иначе HTTP-ответ не успеет.
+    log "Scheduling web UI service restart in 4s (AWG_WEBUI_RESTART_DEFER=1)..."
+    nohup bash -c "sleep 4; systemctl restart ${WEBUI_SERVICE}" </dev/null >/dev/null 2>&1 &
+  else
+    log "Restarting web UI service..."
+    systemctl restart "$WEBUI_SERVICE"
+    systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true
+  fi
   log "Update-only completed."
   exit 0
 fi

@@ -30,6 +30,7 @@ TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d ! -name '*.tgz' | head -1)
 [[ -n "$TOP" ]] || { echo "empty extract"; exit 1; }
 [[ -f "$TOP/awg-webui-bootstrap.sh" ]] || { echo "missing awg-webui-bootstrap.sh in archive"; exit 1; }
 
+export AWG_WEBUI_RESTART_DEFER=1
 DEBIAN_FRONTEND=noninteractive bash "$TOP/awg-webui-bootstrap.sh" --update-files-only --install-deps
 
 echo "=== $(date -Is) self-update finished OK ==="
