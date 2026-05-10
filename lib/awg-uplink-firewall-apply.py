@@ -85,7 +85,9 @@ def main():
     ]
 
     distinct_ingress = ing_en and ingress and ingress != egress
-    same_dev = ing_en and ingress and ingress == egress
+    # Один и тот же NIC: в interfaces.env при совпадении IP/интерфейса INGRESS_ENABLED=0, но INGRESS_DEV
+    # всё равно может совпадать с EGRESS — порты ingress/egress из JSON объединяем.
+    union_fw_ports = bool(egress and ingress and ingress == egress)
 
     if distinct_ingress:
         eg_ps = ", ".join(str(p) for p in eg_ports)
@@ -95,7 +97,7 @@ def main():
         lines.append(f'    iifname "{nft_escape(ingress)}" tcp dport {{ {ing_ps} }} ct state new counter accept')
         lines.append(f'    iifname "{nft_escape(ingress)}" ct state new counter drop')
     else:
-        if same_dev:
+        if union_fw_ports:
             ports = sorted(set(eg_ports) | set(ing_ports))
         else:
             ports = eg_ports
