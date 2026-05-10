@@ -1902,30 +1902,8 @@ textarea {
   color: rgba(255, 255, 255, 0.52);
 }
 
-.footer-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
 .footer-version {
   color: rgba(255, 255, 255, 0.42);
   font-variant-numeric: tabular-nums;
-}
-
-.footer-test-mark,
-.login-test-mark {
-  font-size: 11px;
-  color: rgba(52, 211, 153, 0.85);
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(52, 211, 153, 0.35);
-  background: rgba(52, 211, 153, 0.1);
-}
-
-.login-test-mark {
-  margin-top: 2px;
 }
 
