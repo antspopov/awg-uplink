@@ -123,7 +123,7 @@
                     <span>Включить файрвол панели (UFW)</span>
                   </label>
                   <div class="help">
-                    Только правила с меткой <code>awg-web-ui-fw</code> — остальные порты в UFW не меняются. Нужны активный UFW (<code>sudo ufw enable</code>) и пакет <code>ufw</code>.
+                    При активном UFW — только правила с меткой <code>awg-web-ui-fw</code>. Без UFW или до <code>ufw enable</code> те же ограничения применяются через nft (<code>inet awg_webui_fw</code>).
                     Georouting и DNS-lock по-прежнему на nftables.
                   </div>
                 </div>
