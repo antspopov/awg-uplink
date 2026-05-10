@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AWG Split Gate — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260509-6" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-7" />
   </head>
   <body>
     <div class="app">
@@ -142,45 +142,45 @@
                 </div>
               </div>
             </div>
+          </div>
 
+          <div class="interface-fw-outer">
             <div class="card interface-fw-card">
               <div class="card-head">
                 <div class="card-title">Файрвол и порты</div>
-              </div>
-              <div class="iface-fw-head">
-                <div class="iface-fw-head-text">
-                  <div class="iface-fw-head-title">Файрвол панели</div>
-                  <div class="iface-fw-head-sub">UFW / nft — см. подсказку ниже</div>
+                <div class="iface-fw-head-toggle">
+                  <span class="iface-fw-toggle-text" id="ifaceFwToggleLabel">Включить файрвол</span>
+                  <label class="toggle-switch iface-fw-toggle" title="Включить или выключить файрвол панели">
+                    <input
+                      type="checkbox"
+                      id="ifaceFwEnabled"
+                      role="switch"
+                      aria-labelledby="ifaceFwToggleLabel"
+                      checked
+                    />
+                    <span class="toggle-switch-slider" aria-hidden="true"></span>
+                  </label>
                 </div>
-                <label class="toggle-switch iface-fw-toggle" title="Включить или выключить файрвол панели">
-                  <input type="checkbox" id="ifaceFwEnabled" role="switch" checked />
-                  <span class="toggle-switch-slider" aria-hidden="true"></span>
-                </label>
               </div>
               <div class="row">
                 <div class="field">
-                  <label for="ifaceFwEgressPorts">TCP на egress</label>
+                  <label for="ifaceFwEgressPorts">Открытые порты TCP на egress</label>
                   <input id="ifaceFwEgressPorts" type="text" placeholder="22" />
                 </div>
                 <div class="field">
-                  <label for="ifaceFwIngressPorts">TCP на ingress</label>
+                  <label for="ifaceFwIngressPorts">Открытые порты TCP на ingress</label>
                   <input id="ifaceFwIngressPorts" type="text" placeholder="22, 443, 8080" />
                 </div>
               </div>
-              <div class="help iface-fw-help">
-                Включено: при наличии <code>ufw</code> — <code>ufw enable</code> и только правила с меткой <code>awg-web-ui-fw</code>. Выключено — снять эти правила и <code>ufw disable</code>.
-                Без пакета <code>ufw</code> — те же ограничения через nft (<code>inet awg_webui_fw</code>). При совпадении egress и ingress порты объединяются.
-                Georouting и DNS-lock по-прежнему на nftables.
-              </div>
             </div>
+          </div>
 
-            <div class="actions interface-actions-inline">
-              <div class="actions-left">
-                <button class="btn btn--primary" type="button" id="ifaceSaveBtn">Сохранить</button>
-                <div class="actions-note">Проверьте параметры перед сохранением.</div>
-              </div>
-              <button class="btn" type="button" id="netplanOpenBtn">Edit netplan</button>
+          <div class="actions interface-actions-inline">
+            <div class="actions-left">
+              <button class="btn btn--primary" type="button" id="ifaceSaveBtn">Сохранить</button>
+              <div class="actions-note">Проверьте параметры перед сохранением.</div>
             </div>
+            <button class="btn" type="button" id="netplanOpenBtn">Edit netplan</button>
           </div>
 
           <div id="ifaceConfigGate" class="iface-config-gate">

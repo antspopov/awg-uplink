@@ -490,49 +490,31 @@ body::before {
     grid-column: auto;
   }
 
-  .interface-grid .interface-tunnel-card {
-    grid-column: 1 / -1;
-  }
-
-  .interface-grid .interface-actions-inline {
-    grid-column: 1 / -1;
-    margin-top: 0;
-    padding-top: 0;
-  }
-
-  .interface-grid .interface-fw-card {
-    grid-column: 1 / -1;
-  }
 }
 
-.interface-fw-card .iface-fw-head {
-  display: flex;
+.interface-fw-outer {
+  width: 100%;
+  margin-top: 14px;
+  box-sizing: border-box;
+}
+
+.interface-fw-outer .interface-fw-card {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.iface-fw-head-toggle {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 2px 0 12px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  gap: 10px;
+  flex-shrink: 0;
 }
 
-.interface-fw-card .iface-fw-head-text {
-  min-width: 0;
-}
-
-.interface-fw-card .iface-fw-head-title {
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--text);
-}
-
-.interface-fw-card .iface-fw-head-sub {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
-  margin-top: 3px;
-}
-
-.interface-fw-card .iface-fw-help {
-  margin-top: 12px;
+.iface-fw-toggle-text {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.82);
+  text-align: right;
 }
 
 .interface-fw-card .toggle-switch.iface-fw-toggle {
@@ -989,9 +971,9 @@ select:disabled option {
   flex-wrap: wrap;
 }
 
-.interface-grid .interface-actions-inline {
-  grid-column: 1 / -1;
-  margin-top: 2px;
+.interface-actions-inline {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .actions-left {
