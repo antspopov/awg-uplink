@@ -1488,6 +1488,10 @@ async function initNetworkForm(state) {
     const fw = cfg.firewall || {};
     $("ifaceFwEgressPorts").value = Array.isArray(fw.egress_tcp_ports) ? fw.egress_tcp_ports.join(", ") : "";
     $("ifaceFwIngressPorts").value = Array.isArray(fw.ingress_tcp_ports) ? fw.ingress_tcp_ports.join(", ") : "";
+    if ($("ifaceFwBackend")) {
+      const be = fw.backend === "ufw" ? "ufw" : "nft";
+      $("ifaceFwBackend").value = be;
+    }
     if (cfg.route_mode) {
       state.routeMode = cfg.route_mode;
       state.persistedRouteMode = cfg.route_mode;
@@ -1553,6 +1557,7 @@ function initInterfaceSave() {
       route_mode: window.__awgState && window.__awgState.routeMode ? window.__awgState.routeMode : "egress",
       geo: window.__awgState && window.__awgState.geo ? window.__awgState.geo : {},
       firewall: {
+        backend: $("ifaceFwBackend") ? $("ifaceFwBackend").value : "nft",
         egress_tcp_ports: $("ifaceFwEgressPorts").value,
         ingress_tcp_ports: $("ifaceFwIngressPorts").value,
       },
@@ -1972,6 +1977,7 @@ function initRoutingPanel(state) {
         geo: state.geo || {},
         apply_geo_ip_refresh: true,
         firewall: {
+          backend: $("ifaceFwBackend") ? $("ifaceFwBackend").value : "nft",
           egress_tcp_ports: $("ifaceFwEgressPorts").value,
           ingress_tcp_ports: $("ifaceFwIngressPorts").value,
         },

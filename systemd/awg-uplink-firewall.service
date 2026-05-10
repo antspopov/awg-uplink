@@ -1,5 +1,5 @@
 [Unit]
-Description=Apply nft ingress filters for egress/ingress/awg-uplink
+Description=Apply interface-panel firewall (nft awg_webui_fw or UFW rules)
 After=network-online.target awg-webui-ifaces.service
 Wants=network-online.target
 

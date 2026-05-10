@@ -115,6 +115,19 @@
                   </div>
                 </div>
               </div>
+
+              <div class="row">
+                <div class="field">
+                  <label>Правила файрвола панели</label>
+                  <select id="ifaceFwBackend">
+                    <option value="nft">nftables (таблица inet awg_webui_fw)</option>
+                    <option value="ufw">UFW (удобнее: ufw status numbered; нужны пакет ufw и активный ufw enable)</option>
+                  </select>
+                  <div class="help">
+                    Georouting и DNS-lock по-прежнему на nftables. Здесь только allowlist портов на egress/ingress и запрет входа на awg-uplink.
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="card">

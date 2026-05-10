@@ -767,7 +767,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return hmac.compare_digest(expected, response)
 
     def _default_iface_firewall(self) -> dict:
-        return {"egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000]}
+        return {"backend": "nft", "egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000]}
 
     def _iface_firewall_for_response(self, cfg: dict) -> dict:
         base = self._default_iface_firewall()
@@ -775,6 +775,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         eg = fw.get("egress_tcp_ports")
         ing = fw.get("ingress_tcp_ports")
         out = dict(base)
+        b = fw.get("backend")
+        if isinstance(b, str) and b.strip().lower() in ("nft", "ufw"):
+            out["backend"] = b.strip().lower()
         if isinstance(eg, list) and eg and all(isinstance(x, int) and 1 <= x <= 65535 for x in eg):
             out["egress_tcp_ports"] = sorted(set(eg))
         if isinstance(ing, list) and ing and all(isinstance(x, int) and 1 <= x <= 65535 for x in ing):
@@ -791,6 +794,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cur["egress_tcp_ports"] = eg
         if ing is not None:
             cur["ingress_tcp_ports"] = ing
+        be = fw_body.get("backend")
+        if isinstance(be, str) and be.strip().lower() in ("nft", "ufw"):
+            cur["backend"] = be.strip().lower()
         return cur
 
     def _webui_cfg_dir(self) -> str:
@@ -1260,8 +1266,13 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ingress_enabled = bool(
             ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
         )
+        fw_backend = "nft"
+        fw = cfg.get("firewall") if isinstance(cfg.get("firewall"), dict) else {}
+        if isinstance(fw.get("backend"), str) and fw.get("backend", "").strip().lower() in ("nft", "ufw"):
+            fw_backend = fw.get("backend", "").strip().lower()
         env = [
             "ENABLE=1",
+            f"AWG_FW_BACKEND={shlex.quote(fw_backend)}",
             f"EGRESS_DEV={shlex.quote(egress_dev)}",
             f"EGRESS_IP={shlex.quote(egress_ip)}",
             f"EGRESS_GW={shlex.quote(egress_gw)}",
