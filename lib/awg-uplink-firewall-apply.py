@@ -2,7 +2,10 @@
 """Файрвол панели «интерфейсы».
 
 - Установлен **ufw**: при включённом переключателе панели — `ufw --force enable` и только правила с
-  comment `awg-web-ui-fw` (остальные записи UFW не трогаем). При **выключенном** переключателе —
+  comment `awg-web-ui-fw` (остальные записи UFW не трогаем). На **egress**, **ingress** (если отдельный)
+  и **awg-uplink** — входящий трафик: разрешённые TCP-порты панели, остальное deny; на **всех прочих**
+  интерфейсах (docker/amn/veth и т.д.) — явный **allow in** на весь входящий, иначе при глобальном
+  default deny UFW блокирует DNS и локальный трафик. При **выключенном** переключателе —
   снять помеченные правила, удалить таблицу `inet awg_webui_fw`, **`ufw --force disable`**.
 - **Без пакета ufw** — те же ограничения через nftables (`inet awg_webui_fw`); переключатель «выкл»
   только снимает эту таблицу.
@@ -141,6 +144,38 @@ def ufw_add(rule_args: list[str]) -> bool:
     return True
 
 
+def ufw_managed_input_ifaces(egress: str, distinct_ingress: bool, ingress: str) -> set[str]:
+    """Интерфейсы, на которых входящий трафик режем (остальные считаем «локальными» для UFW)."""
+    s: set[str] = {AWG_IFACE}
+    if egress:
+        s.add(egress)
+    if distinct_ingress and ingress:
+        s.add(ingress)
+    return {x for x in s if x}
+
+
+def ufw_local_input_ifaces(managed: set[str]) -> list[str]:
+    """Все интерфейсы кроме lo и managed — на них нужен allow in при глобальном UFW deny."""
+    proc = subprocess.run(["ip", "-j", "link", "show"], capture_output=True, text=True, timeout=8)
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return []
+    try:
+        items = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+    out: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = (it.get("ifname") or "").strip()
+        if not name or name == "lo" or name in managed:
+            continue
+        out.add(name)
+    return sorted(out)
+
+
 def apply_nft(
     egress: str,
     ing_en: bool,
@@ -235,6 +270,14 @@ def apply_ufw_panel(
 
     def deny_in_on(dev: str) -> None:
         ufw_add(["deny", "in", "on", dev, "comment", UFW_MARKER])
+
+    def allow_all_in_on(dev: str) -> None:
+        """Полный входящий на «локальный» интерфейс (docker bridge, veth и т.д.)."""
+        ufw_add(["allow", "in", "on", dev, "comment", UFW_MARKER])
+
+    managed = ufw_managed_input_ifaces(egress, distinct_ingress, ingress)
+    for loc in ufw_local_input_ifaces(managed):
+        allow_all_in_on(loc)
 
     if distinct_ingress:
         allow_tcp_on(egress, eg_ports)
