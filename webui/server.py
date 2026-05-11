@@ -1873,6 +1873,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "uptime_sec": uptime_sec,
             # Web UI: баннер установки Amnezia, если нет Docker/демона или нет типичного стека контейнеров Amnezia
             "amnezia_setup_banner": not stack,
+            # Синхронизация тоггла файрвола между вкладками / устройствами (poll /api/metrics/system).
+            "iface_firewall_enabled": self._runtime_iface_firewall_enabled(),
         }
         for k, v in upd.items():
             payload[k] = v
@@ -1923,6 +1925,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             k, v = s.split("=", 1)
             out[k.strip()] = v.strip().strip('"').strip("'")
         return out
+
+    def _runtime_iface_firewall_enabled(self) -> bool:
+        """AWG_FW_ENABLED из interfaces.env — совпадает с тем, что применяет awg-uplink-firewall."""
+        raw = (self._load_iface_env_values().get("AWG_FW_ENABLED") or "1").strip().lower()
+        return raw not in ("0", "false", "no", "off", "")
 
     def _detect_tunnel_middle_nat_ip(self) -> str:
         if not self._tunnel_iface_up():

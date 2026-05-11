@@ -630,6 +630,16 @@ async function refreshSystemMetrics(state) {
       checkError: m.update_check_error || "",
     };
     applyAppVersionLabels(m.update_current_version);
+
+    const fwToggle = document.getElementById("ifaceFwEnabled");
+    if (
+      fwToggle &&
+      typeof m.iface_firewall_enabled === "boolean" &&
+      state &&
+      !state.ifaceFwSyncDirty
+    ) {
+      fwToggle.checked = m.iface_firewall_enabled;
+    }
   } catch {
     // keep last values on temporary errors
   }
@@ -1616,11 +1626,24 @@ async function initNetworkForm(state) {
       }
     }
     commitSavedGeoFingerprint(state, state.geo);
+    state.ifaceFwSyncDirty = false;
     refreshInterfaceStatuses(saved && saved.runtime ? saved.runtime : null);
   } catch {
     commitSavedGeoFingerprint(state, state.geo);
     state.interfaceConfigReady = false;
     setInterfaceConfigGateLocked(true);
+  }
+}
+
+function initIfaceFirewallSync(state) {
+  const mark = () => {
+    state.ifaceFwSyncDirty = true;
+  };
+  for (const id of ["ifaceFwEnabled", "ifaceFwEgressPorts", "ifaceFwIngressPorts"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener("change", mark);
+    el.addEventListener("input", mark);
   }
 }
 
@@ -1691,6 +1714,7 @@ function initInterfaceSave() {
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
+      if (window.__awgState) window.__awgState.ifaceFwSyncDirty = false;
       await refreshDnsPanel();
       if (window.__awgState) await refreshMtprotoState(window.__awgState);
     } catch (e) {
@@ -2108,6 +2132,7 @@ function initRoutingPanel(state) {
       toast("Georouting применен. Сервисы обновления списков перезапущены.", "ok", 2600);
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
       refreshGeoUi();
+      state.ifaceFwSyncDirty = false;
       await refreshDnsPanel();
       await refreshMtprotoState(state);
       try {
@@ -2314,6 +2339,7 @@ async function main() {
     mtprotoPendingToggles: {},
     tunnelUp: false,
     interfaceConfigReady: false,
+    ifaceFwSyncDirty: false,
     routeMode: "egress",
     persistedRouteMode: "egress",
     savedGeoFingerprint: "",
@@ -2364,6 +2390,7 @@ async function main() {
   setInterfaceConfigGateLocked(true);
 
   await initNetworkForm(state);
+  initIfaceFirewallSync(state);
   await refreshTunnelStatus(state);
   initRoutingPanel(state);
   await refreshSystemMetrics(state);
