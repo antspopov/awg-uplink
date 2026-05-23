@@ -521,7 +521,7 @@ function renderTunnelImportHelp(state, tunnelId, tunnelMeta = null) {
   const draft = tunnelDraft(state, tunnelId);
   if (draft.importMode) draft.importMode = "";
   if (t.configured && t.ifname) {
-    help.textContent = `Конфиг: /etc/amnezia/amneziawg/${t.ifname}.conf`;
+    help.textContent = `Конфиг задан (${t.ifname}.conf)`;
   } else {
     help.textContent = "Конфиг не задан.";
   }
@@ -790,7 +790,17 @@ function initDualTunnels(state) {
     });
   }
 
-  for (const tid of ["tunnel1", "tunnel2"]) renderTunnelImportHelp(state, tid);
+}
+
+function applyTunnelHealthDefaults() {
+  const el = $("tunnelHealthTargets");
+  if (el && !String(el.value || "").trim()) {
+    el.value = "1.1.1.1, 8.8.8.8";
+  }
+  const intervalEl = $("tunnelHealthInterval");
+  if (intervalEl && !String(intervalEl.value || "").trim()) {
+    intervalEl.value = "30";
+  }
 }
 
 async function refreshTunnelsState(state = null, options = {}) {
@@ -862,6 +872,7 @@ async function refreshTunnelsState(state = null, options = {}) {
     if (state && typeof state.refreshGeoUi === "function") state.refreshGeoUi();
     setTunnelFailoverStatus("dot--bad", "ошибка статуса");
     for (const tid of ["tunnel1", "tunnel2"]) setTunnelLineStatus(tid, "dot--unknown", "ошибка");
+    applyTunnelHealthDefaults();
   }
 }
 
@@ -2874,6 +2885,7 @@ async function main() {
   }
 
   applyAppVersionLabels("");
+  applyTunnelHealthDefaults();
   initDualTunnels(state);
   initAmneziaSetupBanner();
   initWebUiUpdateBanner();

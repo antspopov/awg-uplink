@@ -32,5 +32,10 @@ TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d ! -name '*.tgz' | head -1)
 
 export AWG_WEBUI_RESTART_DEFER=1
 DEBIAN_FRONTEND=noninteractive bash "$TOP/awg-webui-bootstrap.sh" --update-files-only --install-deps
+rc=$?
+if [[ $rc -ne 0 ]]; then
+  echo "bootstrap --update-files-only failed with exit $rc"
+  exit "$rc"
+fi
 
 echo "=== $(date -Is) self-update finished OK ==="

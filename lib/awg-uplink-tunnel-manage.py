@@ -129,7 +129,9 @@ def migrate_config(cfg: dict) -> tuple[dict, bool]:
     defaults = default_config()
     for tid, ddef in TUNNEL_DEFS.items():
         ifname = ddef["ifname"]
-        if (AMNEZIA_DIR / f"{ifname}.conf").exists() and not cfg.get(tid, {}).get("enabled"):
+        conf_paths = [AMNEZIA_DIR / f"{ifname}.conf", Path(f"/etc/wireguard/{ifname}.conf")]
+        has_conf = any(p.exists() for p in conf_paths)
+        if has_conf and not cfg.get(tid, {}).get("enabled"):
             cfg[tid]["enabled"] = True
             changed = True
     if (AMNEZIA_DIR / "awg-uplink.conf").exists():

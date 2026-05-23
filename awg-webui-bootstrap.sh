@@ -715,22 +715,12 @@ install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscry
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
   migrate_legacy_tunnels_json
-  BOOTSTRAP_INSTALLED="$APP_ROOT/awg-webui-bootstrap.sh"
+  post_update_refresh_services
   if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
-    # Self-update из панели: сначала ответ HTTP, затем post-update и перезапуск webui.
-    log "Scheduling post-update + web UI restart in 4s (AWG_WEBUI_RESTART_DEFER=1)..."
-    nohup bash -c "
-      sleep 4
-      export AWG_WEBUI_CFG_DIR=$(printf '%q' \"$CFG_DIR\")
-      if [[ -x $(printf '%q' \"$BOOTSTRAP_INSTALLED\") ]]; then
-        $(printf '%q' \"$BOOTSTRAP_INSTALLED\") --post-update-only || true
-      else
-        systemctl daemon-reload || true
-      fi
-      systemctl restart $(printf '%q' \"$WEBUI_SERVICE\") || true
-    " </dev/null >>/var/lib/awg-uplink-webui/self-update.log 2>&1 &
+    # Self-update: post-update уже выполнен; откладываем только restart webui (ответ API успеет уйти).
+    log "Scheduling web UI restart in 4s (AWG_WEBUI_RESTART_DEFER=1)..."
+    nohup bash -c 'sleep 4; systemctl restart awg-uplink-webui.service' </dev/null >>/var/lib/awg-uplink-webui/self-update.log 2>&1 &
   else
-    post_update_refresh_services
     log "Restarting web UI service..."
     systemctl restart "$WEBUI_SERVICE"
     systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true

@@ -1402,7 +1402,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         defaults = self._default_tunnels_config()
         for tid in ("tunnel1", "tunnel2"):
             ifname = self._tunnel_ifname_from_cfg(cfg, tid)
-            if Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists() and not cfg.get(tid, {}).get("enabled"):
+            conf_paths = (
+                Path(f"/etc/amnezia/amneziawg/{ifname}.conf"),
+                Path(f"/etc/wireguard/{ifname}.conf"),
+            )
+            has_conf = any(p.exists() for p in conf_paths)
+            if has_conf and not cfg.get(tid, {}).get("enabled"):
                 cfg.setdefault(tid, {})["enabled"] = True
                 changed = True
         if Path("/etc/amnezia/amneziawg/awg-uplink.conf").exists() and str(cfg.get("active") or "") not in (
@@ -1538,6 +1543,15 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         defaults = {"tunnel1": "awg-uplink", "tunnel2": "awg-uplink-2"}
         return str(t.get("ifname") or defaults.get(tunnel_id, "awg-uplink")).strip()
 
+    def _tunnel_conf_paths(self, ifname: str) -> list[Path]:
+        return [
+            Path(f"/etc/amnezia/amneziawg/{ifname}.conf"),
+            Path(f"/etc/wireguard/{ifname}.conf"),
+        ]
+
+    def _tunnel_conf_exists(self, ifname: str) -> bool:
+        return any(p.exists() for p in self._tunnel_conf_paths(ifname))
+
     def _active_tunnel_id(self) -> str:
         env = self._load_iface_env_values()
         act = str(env.get("TUNNEL_ACTIVE") or "").strip()
@@ -1634,7 +1648,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _tunnel_is_viable_for_traffic(self, tcfg: dict, tid: str) -> bool:
         """Включён, есть конфиг, link UP, ping не подтверждён как провал."""
         ifname = self._tunnel_ifname(tid)
-        if not Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists():
+        if not self._tunnel_conf_exists(ifname):
             return False
         if not bool(tcfg.get(tid, {}).get("enabled")):
             return False
@@ -1651,7 +1665,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         staged: dict[str, dict] = {}
         for tid in ("tunnel1", "tunnel2"):
             ifname = self._tunnel_ifname(tid)
-            configured = Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists()
+            configured = self._tunnel_conf_exists(ifname)
             enabled = bool(tcfg.get(tid, {}).get("enabled"))
             if not configured:
                 enabled = False
@@ -1710,7 +1724,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         enabled_n = 0
         for tid in ids:
             ifname = self._tunnel_ifname(tid)
-            conf = Path(f"/etc/amnezia/amneziawg/{ifname}.conf")
+            conf_ok = self._tunnel_conf_exists(ifname)
             pol = policy.get(tid, {})
             en = bool(pol.get("enabled"))
             if en:
@@ -1723,7 +1737,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 "ifname": ifname,
                 "label": cfg.get(tid, {}).get("label") or tid,
                 "enabled": en,
-                "configured": conf.exists(),
+                "configured": conf_ok,
                 "link_up": self._tunnel_link_up(ifname),
                 "is_active": tid == active,
                 "toggle_locked": bool(pol.get("toggle_locked")),
@@ -1734,7 +1748,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             }
         out["failover_enabled"] = enabled_n >= 2
         out["health_watch_enabled"] = enabled_n >= 1
-        out["health"] = cfg.get("health")
+        h = cfg.get("health") if isinstance(cfg.get("health"), dict) else {}
+        dh = self._default_tunnels_config().get("health", {})
+        if not h.get("targets"):
+            h = dict(dh)
+            h["targets"] = list(dh.get("targets") or ["1.1.1.1", "8.8.8.8"])
+        out["health"] = h
         out["health_state"] = cfg.get("health_state")
         return out
 
