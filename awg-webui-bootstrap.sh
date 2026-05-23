@@ -40,10 +40,41 @@ die() { echo "${C_RED}[awg-webui-bootstrap] ERROR:${C_RESET} $*" >&2; exit 1; }
 
 # После копирования файлов: применить туннели и перезапустить юниты с обновлёнными скриптами.
 # Раньше перезапускался только webui — failover/ifaces могли остаться со старым кодом в памяти.
+migrate_legacy_tunnels_json() {
+  if [[ -x /usr/local/sbin/awg-uplink-tunnel-manage.py ]]; then
+    log "Migrating tunnels.json (upgrade from legacy single-tunnel install)..."
+    AWG_WEBUI_CFG_DIR="${CFG_DIR:-/etc/awg-uplink-webui}" \
+      python3 /usr/local/sbin/awg-uplink-tunnel-manage.py migrate || log "tunnel migrate: warning"
+  elif [[ ! -f "$CFG_DIR/tunnels.json" ]]; then
+    log "Creating default $CFG_DIR/tunnels.json (no tunnel-manage yet)"
+    install -d -m 700 "$CFG_DIR"
+    cat >"$CFG_DIR/tunnels.json" <<'EOF'
+{
+  "tunnel1": { "id": "tunnel1", "ifname": "awg-uplink", "label": "Туннель 1", "enabled": true },
+  "tunnel2": { "id": "tunnel2", "ifname": "awg-uplink-2", "label": "Туннель 2", "enabled": false },
+  "active": "tunnel1",
+  "health": {
+    "targets": ["1.1.1.1", "8.8.8.8"],
+    "interval_sec": 30,
+    "fail_count": 3,
+    "recover_count": 2,
+    "ping_timeout_sec": 3
+  },
+  "health_state": {
+    "tunnel1": { "fail_streak": 0, "ok_streak": 0 },
+    "tunnel2": { "fail_streak": 0, "ok_streak": 0 }
+  }
+}
+EOF
+    chmod 600 "$CFG_DIR/tunnels.json"
+  fi
+}
+
 post_update_refresh_services() {
   log "Post-update: применение runtime (туннели, ifaces, firewall, таймеры)..."
   systemctl daemon-reload
   export AWG_WEBUI_CFG_DIR="${CFG_DIR:-/etc/awg-uplink-webui}"
+  migrate_legacy_tunnels_json
   if [[ -x /usr/local/sbin/awg-uplink-tunnel-manage.py ]]; then
     if ! python3 /usr/local/sbin/awg-uplink-tunnel-manage.py apply; then
       log "tunnel-manage apply: предупреждение (код выхода не 0)"
@@ -683,6 +714,7 @@ install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscry
 
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
+  migrate_legacy_tunnels_json
   BOOTSTRAP_INSTALLED="$APP_ROOT/awg-webui-bootstrap.sh"
   if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
     # Self-update из панели: сначала ответ HTTP, затем post-update и перезапуск webui.

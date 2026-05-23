@@ -609,7 +609,8 @@ function applyTunnelsConfigToForm(cfg) {
   }
   const h = cfg.health || {};
   if ($("tunnelHealthTargets")) {
-    $("tunnelHealthTargets").value = Array.isArray(h.targets) ? h.targets.join(", ") : "1.1.1.1, 8.8.8.8";
+    const targets = Array.isArray(h.targets) ? h.targets.map((x) => String(x).trim()).filter(Boolean) : [];
+    $("tunnelHealthTargets").value = targets.length ? targets.join(", ") : "1.1.1.1, 8.8.8.8";
   }
   const intervalEl = $("tunnelHealthInterval");
   if (intervalEl && document.activeElement !== intervalEl) {

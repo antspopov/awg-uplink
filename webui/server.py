@@ -1396,15 +1396,64 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _tunnel_manage_script(self) -> str:
         return "/usr/local/sbin/awg-uplink-tunnel-manage.py"
 
+    def _migrate_tunnels_config(self, cfg: dict) -> tuple[dict, bool]:
+        """Дополнить tunnels.json после апгрейда (--update-files-only не создавал файл)."""
+        changed = not Path(self._tunnels_json_path()).exists()
+        defaults = self._default_tunnels_config()
+        for tid in ("tunnel1", "tunnel2"):
+            ifname = self._tunnel_ifname_from_cfg(cfg, tid)
+            if Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists() and not cfg.get(tid, {}).get("enabled"):
+                cfg.setdefault(tid, {})["enabled"] = True
+                changed = True
+        if Path("/etc/amnezia/amneziawg/awg-uplink.conf").exists() and str(cfg.get("active") or "") not in (
+            "tunnel1",
+            "tunnel2",
+        ):
+            cfg["active"] = "tunnel1"
+            changed = True
+        h = cfg.setdefault("health", {})
+        dh = defaults.get("health") if isinstance(defaults.get("health"), dict) else {}
+        if not h.get("targets"):
+            h["targets"] = list(dh.get("targets") or ["1.1.1.1", "8.8.8.8"])
+            changed = True
+        for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
+            if key not in h or h.get(key) in (None, "", 0):
+                if key in dh:
+                    h[key] = dh[key]
+                    changed = True
+        if not isinstance(cfg.get("health_state"), dict):
+            cfg["health_state"] = defaults.get("health_state", {})
+            changed = True
+        return self._normalize_tunnels_config(cfg), changed
+
+    def _tunnel_ifname_from_cfg(self, cfg: dict, tid: str) -> str:
+        t = cfg.get(tid) if isinstance(cfg.get(tid), dict) else {}
+        return str(t.get("ifname") or ("awg-uplink" if tid == "tunnel1" else "awg-uplink-2")).strip()
+
     def _load_tunnels_config(self) -> dict:
-        raw = _read_text(self._tunnels_json_path(), "")
+        path = Path(self._tunnels_json_path())
+        if not path.exists():
+            cfg = self._default_tunnels_config()
+            cfg, changed = self._migrate_tunnels_config(cfg)
+            if changed:
+                self._store_tunnels_config(cfg)
+            return cfg
+        raw = _read_text(str(path), "")
         if not raw.strip():
-            return self._default_tunnels_config()
+            cfg = self._default_tunnels_config()
+            cfg, changed = self._migrate_tunnels_config(cfg)
+            if changed:
+                self._store_tunnels_config(cfg)
+            return cfg
         try:
             obj = json.loads(raw)
-            return self._normalize_tunnels_config(obj if isinstance(obj, dict) else {})
+            cfg = self._normalize_tunnels_config(obj if isinstance(obj, dict) else {})
         except Exception:
-            return self._default_tunnels_config()
+            cfg = self._default_tunnels_config()
+        cfg, changed = self._migrate_tunnels_config(cfg)
+        if changed:
+            self._store_tunnels_config(cfg)
+        return cfg
 
     def _default_tunnels_config(self) -> dict:
         return {
@@ -1454,9 +1503,13 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         bh = base["health"]
         targets = h.get("targets")
         if isinstance(targets, list):
-            bh["targets"] = [str(x).strip() for x in targets if str(x).strip()]
+            parsed = [str(x).strip() for x in targets if str(x).strip()]
+            if parsed:
+                bh["targets"] = parsed
         elif isinstance(targets, str):
-            bh["targets"] = [x.strip() for x in re.split(r"[\s,;]+", targets) if x.strip()]
+            parsed = [x.strip() for x in re.split(r"[\s,;]+", targets) if x.strip()]
+            if parsed:
+                bh["targets"] = parsed
         for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
             if key in h:
                 try:

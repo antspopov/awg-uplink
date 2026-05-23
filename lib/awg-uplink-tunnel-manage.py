@@ -3,6 +3,7 @@
 
 Команды:
   apply          — start/stop awg-quick@ по tunnels.json, синхрон TUNNEL_* в interfaces.env
+  migrate        — создать/дополнить tunnels.json при апгрейде со старой версии (один туннель, health)
   failover-once  — одна проверка health + переключение active при необходимости
   watch          — цикл failover-once (для systemd)
   status         — JSON статуса на stdout
@@ -91,9 +92,13 @@ def load_config() -> dict:
     bh = base["health"]
     targets = h.get("targets")
     if isinstance(targets, list):
-        bh["targets"] = [str(x).strip() for x in targets if str(x).strip()]
+        parsed = [str(x).strip() for x in targets if str(x).strip()]
+        if parsed:
+            bh["targets"] = parsed
     elif isinstance(targets, str):
-        bh["targets"] = [x.strip() for x in re.split(r"[\s,;]+", targets) if x.strip()]
+        parsed = [x.strip() for x in re.split(r"[\s,;]+", targets) if x.strip()]
+        if parsed:
+            bh["targets"] = parsed
     for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
         if key in h:
             try:
@@ -116,6 +121,43 @@ def save_config(cfg: dict) -> None:
     CFG.mkdir(parents=True, exist_ok=True)
     TUNNELS_JSON.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(TUNNELS_JSON, 0o600)
+
+
+def migrate_config(cfg: dict) -> tuple[dict, bool]:
+    """Апгрейд со старой установки: tunnels.json отсутствует или health.targets пуст."""
+    changed = not TUNNELS_JSON.exists()
+    defaults = default_config()
+    for tid, ddef in TUNNEL_DEFS.items():
+        ifname = ddef["ifname"]
+        if (AMNEZIA_DIR / f"{ifname}.conf").exists() and not cfg.get(tid, {}).get("enabled"):
+            cfg[tid]["enabled"] = True
+            changed = True
+    if (AMNEZIA_DIR / "awg-uplink.conf").exists():
+        if cfg.get("active") not in TUNNEL_DEFS:
+            cfg["active"] = "tunnel1"
+            changed = True
+    h = cfg.setdefault("health", {})
+    dh = defaults["health"]
+    if not h.get("targets"):
+        h["targets"] = list(dh["targets"])
+        changed = True
+    for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
+        if key not in h or h.get(key) in (None, "", 0):
+            h[key] = dh[key]
+            changed = True
+    if not isinstance(cfg.get("health_state"), dict):
+        cfg["health_state"] = dict(defaults["health_state"])
+        changed = True
+    return cfg, changed
+
+
+def cmd_migrate() -> None:
+    cfg = load_config()
+    cfg, changed = migrate_config(cfg)
+    if changed:
+        save_config(cfg)
+        log("tunnels.json migrated/created")
+    print(json.dumps({"ok": True, "migrated": changed}, ensure_ascii=False))
 
 
 def conf_path(ifname: str) -> Path:
@@ -501,6 +543,8 @@ def main() -> None:
     cmd = sys.argv[1].strip().lower()
     if cmd == "apply":
         apply_tunnels()
+    elif cmd == "migrate":
+        cmd_migrate()
     elif cmd == "failover-once":
         failover_once()
     elif cmd == "watch":
