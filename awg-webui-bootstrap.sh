@@ -38,6 +38,40 @@ fi
 log() { echo "${C_BLUE}[awg-webui-bootstrap]${C_RESET} $*"; }
 die() { echo "${C_RED}[awg-webui-bootstrap] ERROR:${C_RESET} $*" >&2; exit 1; }
 
+# После копирования файлов: применить туннели и перезапустить юниты с обновлёнными скриптами.
+# Раньше перезапускался только webui — failover/ifaces могли остаться со старым кодом в памяти.
+post_update_refresh_services() {
+  log "Post-update: применение runtime (туннели, ifaces, firewall, таймеры)..."
+  systemctl daemon-reload
+  export AWG_WEBUI_CFG_DIR="${CFG_DIR:-/etc/awg-uplink-webui}"
+  if [[ -x /usr/local/sbin/awg-uplink-tunnel-manage.py ]]; then
+    if ! python3 /usr/local/sbin/awg-uplink-tunnel-manage.py apply; then
+      log "tunnel-manage apply: предупреждение (код выхода не 0)"
+    fi
+  fi
+  local unit
+  for unit in \
+    awg-webui-ifaces.service \
+    awg-uplink-firewall.service \
+    awg-uplink-dns-transport-lock.service \
+    awg-uplink-amnezia-dns-watch.service; do
+    if systemctl cat "$unit" &>/dev/null; then
+      systemctl enable "$unit" 2>/dev/null || true
+      systemctl restart "$unit" 2>/dev/null || log "restart $unit: пропуск"
+    fi
+  done
+  local timer
+  for timer in \
+    awg-uplink-geo-ip-refresh.timer \
+    awg-uplink-geo-domain-refresh.timer \
+    awg-uplink-geo-domain-nft-rotate.timer \
+    awg-uplink-dns-refresh.timer; do
+    if systemctl is-enabled "$timer" &>/dev/null 2>&1; then
+      systemctl restart "$timer" 2>/dev/null || true
+    fi
+  done
+}
+
 # ubuntu-fan (и аналоги) подключают bind-interfaces; наш zzz-awg-uplink-base.conf задаёт bind-dynamic → dnsmasq падает.
 dnsmasq_quarantine_bind_interfaces_snippets() {
   local quarantine=/var/lib/awg-uplink/dnsmasq-package-snippets
@@ -509,6 +543,7 @@ EOF
 
 NO_START=0
 UPDATE_FILES_ONLY=0
+POST_UPDATE_ONLY=0
 INSTALL_DEPS_ON_UPDATE=0
 UNINSTALL=0
 while [[ $# -gt 0 ]]; do
@@ -516,6 +551,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --no-start) NO_START=1 ;;
     --update-files-only) UPDATE_FILES_ONLY=1 ;;
+    --post-update-only) POST_UPDATE_ONLY=1 ;;
     --install-deps) INSTALL_DEPS_ON_UPDATE=1 ;;
     --uninstall) UNINSTALL=1 ;;
     *) die "unknown option: $1" ;;
@@ -524,6 +560,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ ${EUID:-0} -eq 0 ]] || die "run as root: sudo $0"
+if [[ $POST_UPDATE_ONLY -eq 1 ]]; then
+  post_update_refresh_services
+  exit 0
+fi
 if [[ $INSTALL_DEPS_ON_UPDATE -eq 1 && $UPDATE_FILES_ONLY -ne 1 ]]; then
   die "--install-deps requires --update-files-only"
 fi
@@ -585,6 +625,7 @@ cp -a "$WEBUI_SRC/." "$APP_DIR/"
 if [[ -f "$ROOTDIR/VERSION" ]]; then
   install -m 644 "$ROOTDIR/VERSION" "$APP_ROOT/VERSION"
 fi
+install -m 755 "$ROOTDIR/awg-webui-bootstrap.sh" "$APP_ROOT/awg-webui-bootstrap.sh"
 
 log "Installing runtime source files..."
 install -m 755 "$LIB_SRC/awg-webui-iface-routing-apply.sh" "$APP_ROOT/lib/awg-webui-iface-routing-apply.sh"
@@ -601,12 +642,14 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" "$APP_ROOT/lib/awg-uplink-dn
 install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" "$APP_ROOT/lib/awg-uplink-amnezia-dns-watch.py"
 install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" "$APP_ROOT/lib/awg-uplink-dns-transport-lock.py"
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" "$APP_ROOT/lib/awg-uplink-firewall-apply.py"
+[[ -f "$LIB_SRC/awg-uplink-tunnel-manage.py" ]] && install -m 755 "$LIB_SRC/awg-uplink-tunnel-manage.py" "$APP_ROOT/lib/awg-uplink-tunnel-manage.py"
 install -m 755 "$LIB_SRC/awg-mtproto-install.sh" "$APP_ROOT/lib/awg-mtproto-install.sh"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" "$APP_ROOT/systemd/awg-uplink-dns-refresh.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "$APP_ROOT/systemd/awg-uplink-dns-refresh.timer"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "$APP_ROOT/systemd/awg-uplink-amnezia-dns-watch.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" "$APP_ROOT/systemd/awg-uplink-dns-transport-lock.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-firewall.service" "$APP_ROOT/systemd/awg-uplink-firewall.service"
+[[ -f "$SYSTEMD_SRC/awg-uplink-tunnel-failover.service" ]] && install -m 644 "$SYSTEMD_SRC/awg-uplink-tunnel-failover.service" "$APP_ROOT/systemd/awg-uplink-tunnel-failover.service"
 install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "$APP_ROOT/systemd/dnscrypt-proxy.service"
 
 log "Installing routing apply script..."
@@ -617,6 +660,7 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-refresh.py" /usr/local/sbin/awg-uplink-d
 install -m 755 "$LIB_SRC/awg-uplink-amnezia-dns-watch.py" /usr/local/sbin/awg-uplink-amnezia-dns-watch.py
 install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" /usr/local/sbin/awg-uplink-dns-transport-lock.py
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" /usr/local/sbin/awg-uplink-firewall-apply.py
+[[ -f "$LIB_SRC/awg-uplink-tunnel-manage.py" ]] && install -m 755 "$LIB_SRC/awg-uplink-tunnel-manage.py" /usr/local/sbin/awg-uplink-tunnel-manage.py
 install -m 755 "$LIB_SRC/awg-mtproto-install.sh" /usr/local/sbin/awg-mtproto-install.sh
 install -m 755 "$LIB_SRC/awg-webui-self-update.sh" /usr/local/sbin/awg-webui-self-update.sh
 
@@ -634,16 +678,27 @@ install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "/etc/systemd/system/
 install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "/etc/systemd/system/awg-uplink-amnezia-dns-watch.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-transport-lock.service" "/etc/systemd/system/awg-uplink-dns-transport-lock.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-firewall.service" "/etc/systemd/system/awg-uplink-firewall.service"
+[[ -f "$SYSTEMD_SRC/awg-uplink-tunnel-failover.service" ]] && install -m 644 "$SYSTEMD_SRC/awg-uplink-tunnel-failover.service" "/etc/systemd/system/awg-uplink-tunnel-failover.service"
 install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscrypt-proxy.service"
 
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
-  systemctl daemon-reload
+  BOOTSTRAP_INSTALLED="$APP_ROOT/awg-webui-bootstrap.sh"
   if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
-    # Только когда bootstrap дергает сам awg-uplink-webui (self-update из панели): иначе HTTP-ответ не успеет.
-    log "Scheduling web UI service restart in 4s (AWG_WEBUI_RESTART_DEFER=1)..."
-    nohup bash -c "sleep 4; systemctl restart ${WEBUI_SERVICE}" </dev/null >/dev/null 2>&1 &
+    # Self-update из панели: сначала ответ HTTP, затем post-update и перезапуск webui.
+    log "Scheduling post-update + web UI restart in 4s (AWG_WEBUI_RESTART_DEFER=1)..."
+    nohup bash -c "
+      sleep 4
+      export AWG_WEBUI_CFG_DIR=$(printf '%q' \"$CFG_DIR\")
+      if [[ -x $(printf '%q' \"$BOOTSTRAP_INSTALLED\") ]]; then
+        $(printf '%q' \"$BOOTSTRAP_INSTALLED\") --post-update-only || true
+      else
+        systemctl daemon-reload || true
+      fi
+      systemctl restart $(printf '%q' \"$WEBUI_SERVICE\") || true
+    " </dev/null >>/var/lib/awg-uplink-webui/self-update.log 2>&1 &
   else
+    post_update_refresh_services
     log "Restarting web UI service..."
     systemctl restart "$WEBUI_SERVICE"
     systemctl status --no-pager --lines=3 "$WEBUI_SERVICE" || true
@@ -731,6 +786,39 @@ EOF
   chmod 600 "$CFG_DIR/dns.json"
 fi
 
+if [[ ! -f "$CFG_DIR/tunnels.json" ]]; then
+  log "Creating default $CFG_DIR/tunnels.json"
+  cat >"$CFG_DIR/tunnels.json" <<'EOF'
+{
+  "tunnel1": {
+    "id": "tunnel1",
+    "ifname": "awg-uplink",
+    "label": "Туннель 1",
+    "enabled": true
+  },
+  "tunnel2": {
+    "id": "tunnel2",
+    "ifname": "awg-uplink-2",
+    "label": "Туннель 2",
+    "enabled": false
+  },
+  "active": "tunnel1",
+  "health": {
+    "targets": ["1.1.1.1", "8.8.8.8"],
+    "interval_sec": 30,
+    "fail_count": 3,
+    "recover_count": 2,
+    "ping_timeout_sec": 3
+  },
+  "health_state": {
+    "tunnel1": { "fail_streak": 0, "ok_streak": 0 },
+    "tunnel2": { "fail_streak": 0, "ok_streak": 0 }
+  }
+}
+EOF
+  chmod 600 "$CFG_DIR/tunnels.json"
+fi
+
 log "Configuring local DNS (systemd-resolved stub off, dnsmasq base, caches)..."
 install -d -m 755 /var/cache/dnscrypt-proxy
 install -d -m 755 /var/lib/awg-uplink/geo-domain
@@ -794,7 +882,8 @@ AWG_WEBUI_CFG_DIR="$CFG_DIR" python3 /usr/local/sbin/awg-uplink-dns-refresh.py |
 
 systemctl start awg-uplink-dns-refresh.timer >/dev/null 2>&1 || true
 systemctl start awg-uplink-amnezia-dns-watch.service >/dev/null 2>&1 || true
-systemctl start awg-uplink-firewall.service >/dev/null 2>&1 || true
+# Файрвол панели — после первого сохранения интерфейсов (EGRESS_DEV); иначе UFW включится без allow на WAN.
+log "Firewall unit enabled; rules apply after interface save in Web UI."
 systemctl restart awg-uplink-dns-transport-lock.service >/dev/null 2>&1 || true
 
 if [[ $NO_START -eq 0 ]]; then

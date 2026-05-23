@@ -31,7 +31,16 @@ MARK_LOCAL_DEC = "30629"
 RULE_PRIO = os.environ.get("AWG_GEO_IP_RULE_PRIO", "72").strip() or "72"
 NAT_POST_PRIO = os.environ.get("AWG_GEO_IP_NAT_POST_PRIO", "99").strip() or "99"
 LIST_TIMEOUT_SEC = int(os.environ.get("AWG_GEO_IP_FETCH_TIMEOUT_SEC", "40"))
-AWG_IFACE = os.environ.get("AWG_GEO_IP_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
+def resolve_tunnel_iface() -> str:
+    """Активный туннель: TUNNEL_IFACE (failover) важнее устаревших AWG_GEO_* в env."""
+    for key in ("TUNNEL_IFACE", "AWG_GEO_IP_AWG_IFACE", "AWG_GEO_DOMAIN_AWG_IFACE"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return "awg-uplink"
+
+
+AWG_IFACE = "awg-uplink"
 # Таблицы policy routing для fwmark (см. awg-webui-iface-routing-apply.sh EGRESS_TABLE / AWG_GEO).
 TABLE_GEO_TUN = os.environ.get("AWG_GEO_IP_TABLE_TUN", "207").strip() or "207"
 # Отдельная таблица для target=egress, чтобы не зависеть от системной table 202/правил iface (prio 90 -> 203).
@@ -93,7 +102,7 @@ def _maybe_flush_geo_policy_routing_tables() -> None:
     run(["ip", "-4", "route", "flush", "table", TABLE_GEO_EGRESS], check=False)
 
 
-def cleanup():
+def cleanup_ip_nft_only() -> None:
     for dec in (MARK_FWD_DEC, MARK_LOCAL_DEC):
         run(["ip", "rule", "del", "fwmark", dec, "priority", RULE_PRIO], check=False)
         run(["ip", "rule", "del", "fwmark", dec, "priority", "78"], check=False)
@@ -104,7 +113,23 @@ def cleanup():
                 break
     run(["nft", "delete", "table", "ip", NFT_TABLE], check=False)
     run(["nft", "delete", "table", "ip", NFT_NAT_TABLE], check=False)
+
+
+def cleanup():
+    cleanup_ip_nft_only()
     _maybe_flush_geo_policy_routing_tables()
+
+
+def resync_geo_policy_for_domain_mode() -> None:
+    """Режим только domain: после cleanup IP не оставлять table 207/208 пустой."""
+    iface = load_json(CIF_JSON)
+    geo = load_json(GEO_JSON)
+    route_mode = str(iface.get("route_mode", "egress")).strip().lower()
+    if route_mode != "georouting" or not bool(geo.get("domainMode", False)):
+        return
+    target = str(geo.get("target", "tunnel")).strip().lower()
+    table_id = TABLE_GEO_TUN if target == "tunnel" else TABLE_GEO_EGRESS
+    sync_geo_policy_table(table_id, iface)
 
 
 def _nft_escape_iface(name: str) -> str:
@@ -377,6 +402,8 @@ def fetch_to_cache(url: str, target: Path):
 
 
 def main():
+    global AWG_IFACE
+    AWG_IFACE = resolve_tunnel_iface()
     if not shutil.which("nft") or not shutil.which("ip"):
         raise SystemExit("ip/nft is required")
     iface_cfg = load_json(CIF_JSON)
@@ -385,7 +412,11 @@ def main():
     geo = geo if isinstance(geo, dict) else {}
     ip_mode = bool(geo.get("ipMode", False))
     if route_mode != "georouting" or not ip_mode:
-        cleanup()
+        cleanup_ip_nft_only()
+        if route_mode != "georouting":
+            _maybe_flush_geo_policy_routing_tables()
+        else:
+            resync_geo_policy_for_domain_mode()
         return
 
     target = str(geo.get("target", "tunnel")).strip().lower()
@@ -468,6 +499,7 @@ def main():
             seen.add(cidr)
             all_cidrs.append(cidr)
     apply_nft(all_cidrs, table_id, endpoint_ips, iface_cfg, exclude_cidrs)
+    sync_geo_policy_table(table_id, iface_cfg)
 
     if changed:
         geo_ready = geo.setdefault("readyLinks", {})

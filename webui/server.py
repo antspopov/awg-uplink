@@ -131,6 +131,88 @@ def _http_get_text(url: str, timeout: float = 8.0) -> str:
         return resp.read().decode("utf-8", errors="replace").strip()
 
 
+def _http_get_json(url: str, timeout: float = 10.0):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "awg-uplink-webui-update/1.0",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _parse_changelog_section(text: str, version: str) -> str:
+    ver = str(version or "").strip()
+    if not ver or not text:
+        return ""
+    hdr = re.compile(rf"^#{{1,3}}\s*\[?{re.escape(ver)}\]?\s*(?:\s|$)", re.IGNORECASE)
+    any_hdr = re.compile(r"^#{1,3}\s+")
+    body: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        s = line.strip()
+        if hdr.match(s):
+            in_section = True
+            continue
+        if in_section and any_hdr.match(s) and not hdr.match(s):
+            break
+        if in_section:
+            body.append(line.rstrip())
+    return "\n".join(body).strip()
+
+
+_CHANGELOG_VER_HDR = re.compile(
+    r"^#{1,3}\s*\[?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)\]?\s*(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _split_changelog_sections(text: str) -> list[tuple[str, str]]:
+    """Список (version, body) в порядке файла."""
+    if not text:
+        return []
+    sections: list[tuple[str, str]] = []
+    cur_ver = ""
+    cur_lines: list[str] = []
+    for line in text.splitlines():
+        m = _CHANGELOG_VER_HDR.match(line.strip())
+        if m:
+            if cur_ver:
+                sections.append((cur_ver, "\n".join(cur_lines).strip()))
+            cur_ver = m.group(1).strip()
+            cur_lines = []
+            continue
+        if cur_ver:
+            cur_lines.append(line.rstrip())
+    if cur_ver:
+        sections.append((cur_ver, "\n".join(cur_lines).strip()))
+    return sections
+
+
+def _parse_changelog_range(text: str, current: str, latest: str) -> str:
+    """Все секции CHANGELOG с версией (current, latest] — для пропуска нескольких релизов."""
+    cur = str(current or "").strip()
+    lat = str(latest or "").strip()
+    if not lat or not text:
+        return ""
+    picked: list[tuple[tuple[int, int, int], str, str]] = []
+    for ver, body in _split_changelog_sections(text):
+        if not ver or not body:
+            continue
+        if cur and not _semver_gt(ver, cur):
+            continue
+        if _semver_gt(ver, lat):
+            continue
+        picked.append((_semver_tuple(ver), ver, body))
+    if not picked:
+        return _parse_changelog_section(text, lat)
+    picked.sort(key=lambda x: x[0], reverse=True)
+    blocks = [f"## {ver}\n{body}" for _, ver, body in picked]
+    return "\n\n".join(blocks).strip()
+
+
 def _reload_or_restart_service(unit: str, reload_timeout: float = 8.0, restart_timeout: float = 20.0) -> tuple[int, str, str, str]:
     """
     Try systemctl reload first to avoid short connection drops,
@@ -544,7 +626,7 @@ def _infer_mtproto_outbound_mode(parsed: dict, iface: dict) -> str:
     ingress_dev = str(iface.get("ingress_dev", "")).strip()
     if egress_dev and ifname == egress_dev:
         return "egress"
-    if ifname == ingress_dev or ifname == "awg-uplink":
+    if ifname == ingress_dev or ifname in ("awg-uplink", "awg-uplink-2"):
         return "tunnel"
     return "tunnel"
 
@@ -812,6 +894,39 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _default_iface_firewall(self) -> dict:
         return {"enabled": True, "egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000]}
 
+    def _mask_port(self) -> int:
+        raw = (os.environ.get("AWG_UI_MASK_PORT") or "").strip()
+        if not raw:
+            env_path = Path(self._webui_cfg_dir()) / "webui.env"
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("AWG_UI_MASK_PORT="):
+                        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        if raw:
+            try:
+                n = int(raw)
+                if 1 <= n <= 65535:
+                    return n
+            except ValueError:
+                pass
+        return 5000
+
+    def _reserved_tcp_ports(self) -> list[int]:
+        return sorted({80, 443, self._mask_port()})
+
+    @staticmethod
+    def _strip_reserved_ports(ports: list[int], reserved: set[int]) -> list[int]:
+        return sorted({p for p in ports if p not in reserved})
+
+    @staticmethod
+    def _union_reserved_ports(ports: list[int], reserved: list[int]) -> list[int]:
+        return sorted(set(ports) | set(reserved))
+
+    def _firewall_reserved_apply_on(self, cfg: dict) -> str:
+        return "ingress" if _iface_split_active(cfg if isinstance(cfg, dict) else {}) else "egress"
+
     @staticmethod
     def _coerce_firewall_enabled(val) -> bool:
         if isinstance(val, bool):
@@ -834,12 +949,25 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             out["egress_tcp_ports"] = sorted(set(eg))
         if isinstance(ing, list) and ing and all(isinstance(x, int) and 1 <= x <= 65535 for x in ing):
             out["ingress_tcp_ports"] = sorted(set(ing))
+        reserved = self._reserved_tcp_ports()
+        reserved_set = set(reserved)
+        apply_on = self._firewall_reserved_apply_on(cfg if isinstance(cfg, dict) else {})
+        out["reserved_tcp_ports"] = reserved
+        out["reserved_apply_on"] = apply_on
+        if apply_on == "ingress":
+            out["egress_tcp_ports"] = self._strip_reserved_ports(out["egress_tcp_ports"], reserved_set)
+            out["ingress_tcp_ports"] = self._strip_reserved_ports(out["ingress_tcp_ports"], reserved_set)
+        else:
+            combined = sorted(set(out["egress_tcp_ports"]) | set(out["ingress_tcp_ports"]))
+            out["egress_tcp_ports"] = self._strip_reserved_ports(combined, reserved_set)
+            out["ingress_tcp_ports"] = []
         return out
 
     def _merge_iface_firewall_save(self, prev: dict, fw_body) -> dict:
-        cur = self._iface_firewall_for_response(prev if isinstance(prev, dict) else {})
+        prev_cfg = prev if isinstance(prev, dict) else {}
+        cur = self._iface_firewall_for_response(prev_cfg)
         if not isinstance(fw_body, dict):
-            return cur
+            return self._store_iface_firewall_effective(prev_cfg, cur)
         eg = self._parse_dns_tcp_ports(fw_body.get("egress_tcp_ports"))
         ing = self._parse_dns_tcp_ports(fw_body.get("ingress_tcp_ports"))
         if eg is not None:
@@ -848,7 +976,24 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cur["ingress_tcp_ports"] = ing
         if "enabled" in fw_body:
             cur["enabled"] = self._coerce_firewall_enabled(fw_body.get("enabled"))
-        return cur
+        return self._store_iface_firewall_effective(prev_cfg, cur)
+
+    def _store_iface_firewall_effective(self, iface_cfg: dict, fw: dict) -> dict:
+        """Добавляет зарезервированные порты в списки для interfaces.json / UFW."""
+        reserved = self._reserved_tcp_ports()
+        apply_on = self._firewall_reserved_apply_on(iface_cfg)
+        out = {
+            "enabled": fw.get("enabled", True),
+            "egress_tcp_ports": list(fw.get("egress_tcp_ports") or []),
+            "ingress_tcp_ports": list(fw.get("ingress_tcp_ports") or []),
+        }
+        if apply_on == "ingress":
+            out["ingress_tcp_ports"] = self._union_reserved_ports(out["ingress_tcp_ports"], reserved)
+        else:
+            merged = sorted(set(out["egress_tcp_ports"]) | set(out["ingress_tcp_ports"]))
+            out["egress_tcp_ports"] = self._union_reserved_ports(merged, reserved)
+            out["ingress_tcp_ports"] = self._strip_reserved_ports(out["ingress_tcp_ports"], set(reserved))
+        return out
 
     def _webui_cfg_dir(self) -> str:
         return os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui")
@@ -1245,9 +1390,118 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         enabled = (out_e or "").strip() if rc_e == 0 else "disabled"
         return {"name": name, "active": active, "enabled": enabled, "ok": active == "active"}
 
-    def _tunnel_iface_up(self) -> bool:
-        """True if kernel device awg-uplink exists and has UP flag (L3 usable for tunnel routing)."""
-        rc, out, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
+    def _tunnels_json_path(self) -> str:
+        return str(Path(self._webui_cfg_dir()) / "tunnels.json")
+
+    def _tunnel_manage_script(self) -> str:
+        return "/usr/local/sbin/awg-uplink-tunnel-manage.py"
+
+    def _load_tunnels_config(self) -> dict:
+        raw = _read_text(self._tunnels_json_path(), "")
+        if not raw.strip():
+            return self._default_tunnels_config()
+        try:
+            obj = json.loads(raw)
+            return self._normalize_tunnels_config(obj if isinstance(obj, dict) else {})
+        except Exception:
+            return self._default_tunnels_config()
+
+    def _default_tunnels_config(self) -> dict:
+        return {
+            "tunnel1": {
+                "id": "tunnel1",
+                "ifname": "awg-uplink",
+                "label": "Туннель 1",
+                "enabled": True,
+            },
+            "tunnel2": {
+                "id": "tunnel2",
+                "ifname": "awg-uplink-2",
+                "label": "Туннель 2",
+                "enabled": False,
+            },
+            "active": "tunnel1",
+            "health": {
+                "targets": ["1.1.1.1", "8.8.8.8"],
+                "interval_sec": 30,
+                "fail_count": 3,
+                "recover_count": 2,
+                "ping_timeout_sec": 3,
+            },
+            "health_state": {
+                "tunnel1": {"fail_streak": 0, "ok_streak": 0, "last_ping_ok": None, "last_check_at": None},
+                "tunnel2": {"fail_streak": 0, "ok_streak": 0, "last_ping_ok": None, "last_check_at": None},
+            },
+        }
+
+    def _normalize_tunnels_config(self, raw: dict) -> dict:
+        base = self._default_tunnels_config()
+        for tid in ("tunnel1", "tunnel2"):
+            t = raw.get(tid) if isinstance(raw.get(tid), dict) else {}
+            base[tid].update(
+                {
+                    "id": tid,
+                    "ifname": str(t.get("ifname") or base[tid]["ifname"]).strip() or base[tid]["ifname"],
+                    "label": str(t.get("label") or base[tid]["label"]).strip() or base[tid]["label"],
+                    "enabled": bool(t.get("enabled", base[tid]["enabled"])),
+                }
+            )
+        act = str(raw.get("active", "tunnel1") or "tunnel1").strip()
+        if act not in ("tunnel1", "tunnel2"):
+            act = "tunnel1"
+        base["active"] = act
+        h = raw.get("health") if isinstance(raw.get("health"), dict) else {}
+        bh = base["health"]
+        targets = h.get("targets")
+        if isinstance(targets, list):
+            bh["targets"] = [str(x).strip() for x in targets if str(x).strip()]
+        elif isinstance(targets, str):
+            bh["targets"] = [x.strip() for x in re.split(r"[\s,;]+", targets) if x.strip()]
+        for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
+            if key in h:
+                try:
+                    bh[key] = max(1, int(h[key]))
+                except (TypeError, ValueError):
+                    pass
+        hs = raw.get("health_state") if isinstance(raw.get("health_state"), dict) else {}
+        for tid in ("tunnel1", "tunnel2"):
+            st = hs.get(tid) if isinstance(hs.get(tid), dict) else {}
+            base["health_state"][tid] = {
+                "fail_streak": int(st.get("fail_streak", 0) or 0),
+                "ok_streak": int(st.get("ok_streak", 0) or 0),
+                "last_ping_ok": st.get("last_ping_ok"),
+                "last_check_at": st.get("last_check_at"),
+            }
+        return base
+
+    def _store_tunnels_config(self, cfg: dict) -> None:
+        _mkdir(self._webui_cfg_dir())
+        _write_text(self._tunnels_json_path(), json.dumps(self._normalize_tunnels_config(cfg), ensure_ascii=False, indent=2) + "\n")
+        os.chmod(self._tunnels_json_path(), 0o600)
+
+    def _tunnel_ifname(self, tunnel_id: str) -> str:
+        cfg = self._load_tunnels_config()
+        t = cfg.get(tunnel_id, {}) if isinstance(cfg.get(tunnel_id), dict) else {}
+        defaults = {"tunnel1": "awg-uplink", "tunnel2": "awg-uplink-2"}
+        return str(t.get("ifname") or defaults.get(tunnel_id, "awg-uplink")).strip()
+
+    def _active_tunnel_id(self) -> str:
+        env = self._load_iface_env_values()
+        act = str(env.get("TUNNEL_ACTIVE") or "").strip()
+        if act in ("tunnel1", "tunnel2"):
+            return act
+        cfg = self._load_tunnels_config()
+        return str(cfg.get("active") or "tunnel1")
+
+    def _active_tunnel_ifname(self) -> str:
+        env = self._load_iface_env_values()
+        iface = str(env.get("TUNNEL_IFACE") or "").strip()
+        if iface:
+            return iface
+        return self._tunnel_ifname(self._active_tunnel_id())
+
+    def _tunnel_link_up(self, ifname: str) -> bool:
+        rc, out, _ = _run(["ip", "-j", "link", "show", "dev", ifname], timeout=2.0)
         if rc != 0:
             return False
         try:
@@ -1258,6 +1512,178 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return "UP" in flags
         except Exception:
             return False
+
+    def _tunnel_iface_up(self) -> bool:
+        """True if active tunnel device exists and is UP."""
+        return self._tunnel_link_up(self._active_tunnel_ifname())
+
+    def _apply_tunnels_runtime(self, *, restart_routing: bool = False) -> None:
+        script = self._tunnel_manage_script()
+        if not Path(script).is_file():
+            return
+        env = os.environ.copy()
+        env["AWG_WEBUI_CFG_DIR"] = self._webui_cfg_dir()
+        env["AWG_TUNNEL_RESTART_ROUTING"] = "1" if restart_routing else "0"
+        proc = subprocess.run(
+            ["python3", script, "apply"],
+            capture_output=True,
+            text=True,
+            timeout=90.0,
+            env=env,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "tunnel apply failed").strip()
+            raise RuntimeError(err)
+        cfg = self._load_tunnels_config()
+        en = [tid for tid in ("tunnel1", "tunnel2") if cfg.get(tid, {}).get("enabled")]
+        unit = "awg-uplink-tunnel-failover.service"
+        if len(en) >= 1:
+            _run(["systemctl", "enable", unit], timeout=5.0)
+            _run(["systemctl", "restart", unit], timeout=15.0)
+        else:
+            _run(["systemctl", "stop", unit], timeout=15.0)
+            _run(["systemctl", "disable", unit], timeout=5.0)
+
+    def _tunnel_ping_meta(self, cfg: dict, tid: str) -> dict:
+        if not cfg.get(tid, {}).get("enabled"):
+            return {"ping_ok": None, "ping_checked": False, "ping_status": "выключен"}
+        hs = cfg.get("health_state", {}).get(tid, {})
+        if not isinstance(hs, dict):
+            hs = {}
+        last_at = hs.get("last_check_at")
+        if last_at is None:
+            return {"ping_ok": None, "ping_checked": False, "ping_status": "ожидает проверки"}
+        ok = bool(hs.get("last_ping_ok"))
+        if ok:
+            return {"ping_ok": True, "ping_checked": True, "ping_status": "связь OK (ping)"}
+        return {"ping_ok": False, "ping_checked": True, "ping_status": "нет связи (ping)"}
+
+    def _tunnel_traffic_required(self) -> tuple[bool, str]:
+        """Нужен ли хотя бы один включённый туннель для текущей маршрутизации/MTProto."""
+        reasons: list[str] = []
+        iface = self._load_iface_config()
+        route_mode = str(iface.get("route_mode", "egress") or "egress").strip().lower()
+        if route_mode == "tunnel":
+            reasons.append("маршрут в туннель")
+        elif route_mode == "georouting":
+            geo = iface.get("geo") if isinstance(iface.get("geo"), dict) else self._load_geo_config()
+            target = str(geo.get("target", "tunnel") or "tunnel").strip().lower()
+            if target == "tunnel":
+                reasons.append("georouting → туннель")
+        prefs = self._load_mtproto_prefs()
+        cfg_text = _read_text(self._mtproto_config_path(), "")
+        mtp = _effective_mtproto_outbound_mode(prefs, cfg_text, iface)
+        if mtp == "tunnel":
+            reasons.append("MTProto → туннель")
+        return bool(reasons), "; ".join(reasons)
+
+    def _tunnel_is_viable_for_traffic(self, tcfg: dict, tid: str) -> bool:
+        """Включён, есть конфиг, link UP, ping не подтверждён как провал."""
+        ifname = self._tunnel_ifname(tid)
+        if not Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists():
+            return False
+        if not bool(tcfg.get(tid, {}).get("enabled")):
+            return False
+        if not self._tunnel_link_up(ifname):
+            return False
+        ping = self._tunnel_ping_meta(tcfg, tid)
+        if ping.get("ping_checked") and ping.get("ping_ok") is False:
+            return False
+        return True
+
+    def _tunnel_ui_policy(self, tcfg: dict) -> dict[str, dict]:
+        """enabled/toggle_locked/delete_locked для UI и сохранения."""
+        traffic_req, traffic_reason = self._tunnel_traffic_required()
+        staged: dict[str, dict] = {}
+        for tid in ("tunnel1", "tunnel2"):
+            ifname = self._tunnel_ifname(tid)
+            configured = Path(f"/etc/amnezia/amneziawg/{ifname}.conf").exists()
+            enabled = bool(tcfg.get(tid, {}).get("enabled"))
+            if not configured:
+                enabled = False
+            staged[tid] = {"configured": configured, "enabled": enabled}
+        enabled_ids = [tid for tid in ("tunnel1", "tunnel2") if staged[tid]["enabled"]]
+        viable_ids = [tid for tid in enabled_ids if self._tunnel_is_viable_for_traffic(tcfg, tid)]
+        lock_msg = f"Туннель используется ({traffic_reason}) — отключить нельзя"
+        delete_msg = f"Туннель используется ({traffic_reason}) — удалить нельзя"
+        out: dict[str, dict] = {}
+        for tid in ("tunnel1", "tunnel2"):
+            configured = staged[tid]["configured"]
+            enabled = staged[tid]["enabled"]
+            toggle_locked = False
+            toggle_lock_reason = ""
+            delete_locked = False
+            delete_lock_reason = ""
+            if not configured:
+                toggle_locked = True
+                enabled = False
+                toggle_lock_reason = "Сначала импортируйте конфиг (.conf)"
+                delete_locked = True
+                delete_lock_reason = "Конфиг не задан"
+            elif traffic_req and tid in enabled_ids:
+                only_enabled_in_cfg = len(enabled_ids) == 1
+                only_viable = tid in viable_ids and len(viable_ids) == 1
+                if only_enabled_in_cfg or only_viable:
+                    toggle_locked = True
+                    enabled = True
+                    toggle_lock_reason = lock_msg
+                    delete_locked = True
+                    delete_lock_reason = delete_msg
+            out[tid] = {
+                "enabled": enabled,
+                "configured": configured,
+                "toggle_locked": toggle_locked,
+                "toggle_lock_reason": toggle_lock_reason,
+                "delete_locked": delete_locked,
+                "delete_lock_reason": delete_lock_reason,
+            }
+        return out
+
+    def _tunnel_status_payload(self, tunnel_id: str | None = None) -> dict:
+        cfg = self._load_tunnels_config()
+        policy = self._tunnel_ui_policy(cfg)
+        traffic_req, traffic_reason = self._tunnel_traffic_required()
+        active = self._active_tunnel_id()
+        out = {
+            "active": active,
+            "failover_enabled": False,
+            "health_watch_enabled": False,
+            "tunnel_traffic_required": traffic_req,
+            "tunnel_traffic_reason": traffic_reason,
+            "tunnels": {},
+        }
+        ids = [tunnel_id] if tunnel_id in ("tunnel1", "tunnel2") else ("tunnel1", "tunnel2")
+        enabled_n = 0
+        for tid in ids:
+            ifname = self._tunnel_ifname(tid)
+            conf = Path(f"/etc/amnezia/amneziawg/{ifname}.conf")
+            pol = policy.get(tid, {})
+            en = bool(pol.get("enabled"))
+            if en:
+                enabled_n += 1
+            ping_cfg = dict(cfg)
+            ping_cfg[tid] = dict(cfg.get(tid, {}))
+            ping_cfg[tid]["enabled"] = en
+            out["tunnels"][tid] = {
+                "id": tid,
+                "ifname": ifname,
+                "label": cfg.get(tid, {}).get("label") or tid,
+                "enabled": en,
+                "configured": conf.exists(),
+                "link_up": self._tunnel_link_up(ifname),
+                "is_active": tid == active,
+                "toggle_locked": bool(pol.get("toggle_locked")),
+                "toggle_lock_reason": str(pol.get("toggle_lock_reason") or ""),
+                "delete_locked": bool(pol.get("delete_locked")),
+                "delete_lock_reason": str(pol.get("delete_lock_reason") or ""),
+                **self._tunnel_ping_meta(ping_cfg, tid),
+            }
+        out["failover_enabled"] = enabled_n >= 2
+        out["health_watch_enabled"] = enabled_n >= 1
+        out["health"] = cfg.get("health")
+        out["health_state"] = cfg.get("health_state")
+        return out
 
     def _load_iface_config(self) -> dict:
         raw = _read_text(self._webui_iface_json(), "")
@@ -1291,6 +1717,34 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         g = self._normalize_geo_cfg(geo)
         _mkdir(self._webui_cfg_dir())
         _write_text(self._webui_geo_json(), json.dumps(g, ensure_ascii=False, indent=2) + "\n")
+
+    _PRESERVE_IFACE_ENV_KEYS = frozenset(
+        {
+            "TUNNEL_IFACE",
+            "TUNNEL_ACTIVE",
+            "TUNNEL1_IFACE",
+            "TUNNEL2_IFACE",
+            "TUNNEL_FAILOVER_ENABLED",
+            "AWG_GEO_IP_AWG_IFACE",
+            "AWG_GEO_DOMAIN_AWG_IFACE",
+            "AWG_FW_AWG_IFACE",
+        }
+    )
+
+    def _read_preserved_iface_env(self) -> dict[str, str]:
+        path = Path(self._webui_iface_env())
+        if not path.exists():
+            return {}
+        out: dict[str, str] = {}
+        for line in _read_text(str(path), "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if key in self._PRESERVE_IFACE_ENV_KEYS:
+                out[key] = val.strip().strip("'\"")
+        return out
 
     def _write_iface_env(self, cfg: dict, mtproto_outbound_mode: str | None = None):
         egress_dev = str(cfg.get("egress_dev", "")).strip()
@@ -1341,8 +1795,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             "# Tunnel + Docker-VPN: optional knobs for awg-webui-iface-routing-apply.sh",
             "# DOCKER_FORCE_PORT=39983",
             "# DOCKER_MARK_IN=amn0",
-            "",
         ]
+        preserved = self._read_preserved_iface_env()
+        tunnel_if = str(preserved.get("TUNNEL_IFACE", "") or "").strip()
+        written = {line.split("=", 1)[0] for line in env if "=" in line and not line.startswith("#")}
+        for key, val in preserved.items():
+            if key in ("AWG_GEO_IP_AWG_IFACE", "AWG_GEO_DOMAIN_AWG_IFACE", "AWG_FW_AWG_IFACE") and tunnel_if:
+                val = tunnel_if
+            if key not in written and val:
+                env.append(f"{key}={shlex.quote(val)}")
+        env.append("")
         _mkdir(self._webui_cfg_dir())
         _write_text(self._webui_iface_env(), "\n".join(env))
 
@@ -1444,6 +1906,13 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         shutil.copyfile(tl_py, "/usr/local/sbin/awg-uplink-dns-transport-lock.py")
         os.chmod("/usr/local/sbin/awg-uplink-dns-transport-lock.py", 0o755)
         shutil.copyfile(tl_svc, "/etc/systemd/system/awg-uplink-dns-transport-lock.service")
+        tun_py = str(root / "lib" / "awg-uplink-tunnel-manage.py")
+        tun_svc = str(root / "systemd" / "awg-uplink-tunnel-failover.service")
+        if Path(tun_py).exists():
+            shutil.copyfile(tun_py, "/usr/local/sbin/awg-uplink-tunnel-manage.py")
+            os.chmod("/usr/local/sbin/awg-uplink-tunnel-manage.py", 0o755)
+        if Path(tun_svc).exists():
+            shutil.copyfile(tun_svc, "/etc/systemd/system/awg-uplink-tunnel-failover.service")
         dc_unit = root / "systemd" / "dnscrypt-proxy.service"
         if not dc_unit.exists():
             raise RuntimeError("dnscrypt-proxy.service missing (systemd/)")
@@ -1460,8 +1929,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _run(["systemctl", "enable", "awg-uplink-firewall.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-firewall.service"], timeout=30.0)
 
-    def _apply_iface_routing(self):
+    def _apply_iface_routing(self, cfg: dict | None = None):
+        """Apply interface routing; optional cfg to refresh geo policy tables after restart."""
+        if cfg is None:
+            cfg = self._load_iface_config()
         self._install_iface_runtime()
+        self._apply_tunnels_runtime()
         _run(["systemctl", "daemon-reload"], timeout=3.0)
         _run(["systemctl", "enable", "awg-webui-ifaces.service"], timeout=3.0)
         rc, out, err = _run(["systemctl", "restart", "awg-webui-ifaces.service"], timeout=5.0)
@@ -1470,6 +1943,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         self._restart_awg_uplink_firewall()
         _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
+        if str(cfg.get("route_mode", "")).strip().lower() == "georouting":
+            self._apply_geo_ip_runtime(cfg, run_refresh_now=True)
+            self._apply_geo_domain_runtime(cfg, run_refresh_now=True)
 
     def _apply_geo_ip_runtime(self, cfg: dict, *, run_refresh_now: bool = True):
         """run_refresh_now: однократный запуск awg-uplink-geo-ip-refresh.service (подтянуть списки в nft).
@@ -1520,8 +1996,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         default_line = default_lines[0] if default_lines else ""
         egress_ok = False
         if effective == "tunnel":
-            # In tunnel mode, system default must point to awg-uplink.
-            egress_ok = any("dev awg-uplink" in ln for ln in default_lines)
+            tun_dev = self._active_tunnel_ifname()
+            egress_ok = any(f"dev {tun_dev}" in ln for ln in default_lines)
         else:
             for ln in default_lines:
                 if f"dev {egress_dev}" not in ln:
@@ -1650,7 +2126,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             # - awg-uplink: tunnel itself
             if (
                 name == "lo"
-                or name == "awg-uplink"
+                or name in (self._tunnel_ifname("tunnel1"), self._tunnel_ifname("tunnel2"))
                 or name.startswith("docker")
                 or (name.startswith("amn") and name[3:].isdigit())
             ):
@@ -1676,30 +2152,151 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             ifaces.append({"name": name, "ipv4": addrs, "ipv4_info": addrs_info})
         return self._send_json(200, {"ifaces": ifaces})
 
-    def _api_status_awg(self):
-        conf_path = "/etc/amnezia/amneziawg/awg-uplink.conf"
-        rc, out, _ = _run(["ip", "-j", "link", "show", "dev", "awg-uplink"], timeout=2.0)
+    def _api_status_awg(self, tunnel_id: str = "tunnel1"):
+        if tunnel_id not in ("tunnel1", "tunnel2"):
+            tunnel_id = "tunnel1"
+        ifname = self._tunnel_ifname(tunnel_id)
+        conf_path = Path(f"/etc/amnezia/amneziawg/{ifname}.conf")
+        rc, out, _ = _run(["ip", "-j", "link", "show", "dev", ifname], timeout=2.0)
+        cfg = self._load_tunnels_config()
+        active = self._active_tunnel_id()
+        base = {
+            "tunnel_id": tunnel_id,
+            "ifname": ifname,
+            "active": active,
+            "is_active": tunnel_id == active,
+            "enabled": bool(cfg.get(tunnel_id, {}).get("enabled")),
+        }
         if rc != 0:
-            return self._send_json(200, {"exists": False, "configured": Path(conf_path).exists()})
+            return self._send_json(200, {**base, "exists": False, "configured": conf_path.exists()})
         try:
             items = json.loads(out)
         except Exception:
             items = []
         if not items:
-            return self._send_json(200, {"exists": False, "configured": Path(conf_path).exists()})
+            return self._send_json(200, {**base, "exists": False, "configured": conf_path.exists()})
         it = items[0]
         flags = it.get("flags", []) or []
         state = "UP" if "UP" in flags else "DOWN"
         return self._send_json(
             200,
             {
+                **base,
                 "exists": True,
-                "configured": Path(conf_path).exists(),
+                "configured": conf_path.exists(),
                 "state": state,
                 "operstate": it.get("operstate"),
                 "flags": flags,
             },
         )
+
+    def _api_tunnels_config(self):
+        return self._send_json(200, self._tunnel_status_payload())
+
+    def _op_tunnels_save(self, body: dict) -> dict:
+        cfg = self._load_tunnels_config()
+        policy_before = self._tunnel_ui_policy(cfg)
+        enabled_before = {tid: bool(cfg.get(tid, {}).get("enabled")) for tid in ("tunnel1", "tunnel2")}
+        for tid in ("tunnel1", "tunnel2"):
+            b = body.get(tid) if isinstance(body.get(tid), dict) else {}
+            pol = policy_before.get(tid, {})
+            if pol.get("toggle_locked"):
+                cfg[tid]["enabled"] = bool(pol.get("enabled"))
+            elif "enabled" in b:
+                cfg[tid]["enabled"] = bool(b.get("enabled"))
+            if "label" in b:
+                cfg[tid]["label"] = str(b.get("label") or cfg[tid]["label"]).strip()
+        h = body.get("health") if isinstance(body.get("health"), dict) else {}
+        if h:
+            ch = cfg.setdefault("health", {})
+            targets = h.get("targets")
+            if targets is not None:
+                if isinstance(targets, list):
+                    ch["targets"] = [str(x).strip() for x in targets if str(x).strip()]
+                else:
+                    ch["targets"] = [x.strip() for x in re.split(r"[\s,;]+", str(targets)) if x.strip()]
+            for key in ("interval_sec", "fail_count", "recover_count", "ping_timeout_sec"):
+                if key not in h:
+                    continue
+                try:
+                    if key == "interval_sec":
+                        ch[key] = max(5, int(h[key]))
+                    else:
+                        ch[key] = max(1, int(h[key]))
+                except (TypeError, ValueError):
+                    pass
+        enabled_after = {tid: bool(cfg.get(tid, {}).get("enabled")) for tid in ("tunnel1", "tunnel2")}
+        enabled_changed = enabled_before != enabled_after
+        self._store_tunnels_config(cfg)
+        iface = self._load_iface_config()
+        route_mode = str(iface.get("route_mode", "")).strip().lower()
+        need_iface_restart = False
+        if enabled_changed:
+            if route_mode == "tunnel":
+                need_iface_restart = True
+            elif route_mode == "georouting":
+                geo = iface.get("geo") if isinstance(iface.get("geo"), dict) else self._load_geo_config()
+                # target=egress: базовый default в туннель — нужен apply ifaces
+                need_iface_restart = str(geo.get("target", "tunnel") or "tunnel").strip().lower() == "egress"
+            else:
+                need_iface_restart = True
+        self._apply_tunnels_runtime(restart_routing=need_iface_restart)
+        if route_mode == "georouting" and (enabled_changed or h):
+            try:
+                self._apply_geo_ip_runtime(iface, run_refresh_now=True)
+                self._apply_geo_domain_runtime(iface, run_refresh_now=True)
+            except Exception:
+                pass
+        return {"ok": True, "config": self._tunnel_status_payload()}
+
+    def _op_tunnel_delete(self, body: dict) -> dict:
+        tunnel_id = self._tunnel_id_from_body(body)
+        cfg = self._load_tunnels_config()
+        policy = self._tunnel_ui_policy(cfg)
+        pol = policy.get(tunnel_id, {})
+        if pol.get("delete_locked"):
+            raise RuntimeError(pol.get("delete_lock_reason") or "cannot delete tunnel config")
+
+        ifname = self._tunnel_ifname(tunnel_id)
+        conf_path = Path(f"/etc/amnezia/amneziawg/{ifname}.conf")
+        was_enabled = bool(cfg.get(tunnel_id, {}).get("enabled"))
+
+        unit = f"awg-quick@{ifname}.service"
+        _run(["systemctl", "stop", unit], timeout=12.0)
+        _run(["systemctl", "disable", unit], timeout=5.0)
+        if conf_path.exists():
+            conf_path.unlink()
+
+        cfg[tunnel_id]["enabled"] = False
+        if str(cfg.get("active") or "tunnel1") == tunnel_id:
+            other = "tunnel2" if tunnel_id == "tunnel1" else "tunnel1"
+            if cfg.get(other, {}).get("enabled"):
+                cfg["active"] = other
+        self._store_tunnels_config(cfg)
+
+        iface = self._load_iface_config()
+        route_mode = str(iface.get("route_mode", "")).strip().lower()
+        need_iface_restart = False
+        if was_enabled:
+            if route_mode == "tunnel":
+                need_iface_restart = True
+            elif route_mode == "georouting":
+                geo = iface.get("geo") if isinstance(iface.get("geo"), dict) else self._load_geo_config()
+                need_iface_restart = str(geo.get("target", "tunnel") or "tunnel").strip().lower() == "egress"
+            else:
+                need_iface_restart = True
+        self._apply_tunnels_runtime(restart_routing=need_iface_restart)
+        if route_mode == "georouting":
+            try:
+                self._apply_geo_ip_runtime(iface, run_refresh_now=True)
+                self._apply_geo_domain_runtime(iface, run_refresh_now=True)
+            except Exception:
+                pass
+        return {"ok": True, "tunnel_id": tunnel_id, "config": self._tunnel_status_payload()}
+
+    def _tunnel_id_from_body(self, body: dict) -> str:
+        tid = str(body.get("tunnel_id", "tunnel1") or "tunnel1").strip()
+        return tid if tid in ("tunnel1", "tunnel2") else "tunnel1"
 
     def _app_root_dir(self) -> Path:
         return Path(__file__).resolve().parent.parent
@@ -1716,6 +2313,56 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 
     def _read_local_version(self) -> str:
         return _read_installed_app_version()
+
+    def _fetch_update_release_notes(self, repo: str, branch: str, current: str, latest: str) -> dict:
+        """CHANGELOG.md + коммиты GitHub (compare по тегу или последние на ветке)."""
+        out: dict = {"update_changelog": "", "update_commits": []}
+        if not latest:
+            return out
+        cl_url = f"https://raw.githubusercontent.com/{repo}/{branch}/CHANGELOG.md"
+        try:
+            cl_text = _http_get_text(cl_url, timeout=12.0)
+            out["update_changelog"] = _parse_changelog_range(cl_text, current, latest)
+        except Exception:
+            pass
+        commits: list[dict] = []
+        br_q = urllib.parse.quote(branch, safe="")
+        for tag_from in (f"v{current}", current):
+            if not tag_from or not current:
+                break
+            cmp_url = f"https://api.github.com/repos/{repo}/compare/{urllib.parse.quote(tag_from, safe='')}...{br_q}"
+            try:
+                data = _http_get_json(cmp_url, timeout=15.0)
+                if isinstance(data, dict) and data.get("status") not in ("diverged", "identical"):
+                    for item in (data.get("commits") or [])[:80]:
+                        if not isinstance(item, dict):
+                            continue
+                        c = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+                        msg = str(c.get("message", "") or "").strip()
+                        sha = str(item.get("sha", "") or "")[:7]
+                        if msg and sha:
+                            commits.append({"sha": sha, "message": msg.split("\n", 1)[0].strip()})
+                    if commits:
+                        break
+            except Exception:
+                continue
+        if not commits:
+            list_url = f"https://api.github.com/repos/{repo}/commits?sha={br_q}&per_page=20"
+            try:
+                data = _http_get_json(list_url, timeout=15.0)
+                if isinstance(data, list):
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        c = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+                        msg = str(c.get("message", "") or "").strip()
+                        sha = str(item.get("sha", "") or "")[:7]
+                        if msg and sha:
+                            commits.append({"sha": sha, "message": msg.split("\n", 1)[0].strip()})
+            except Exception:
+                pass
+        out["update_commits"] = commits
+        return out
 
     def _compute_update_info_uncached(self) -> dict:
         repo, branch = self._update_repo_and_branch()
@@ -1744,6 +2391,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cur = out["update_current_version"]
             if remote and _semver_gt(remote, cur):
                 out["update_available"] = True
+                try:
+                    notes = self._fetch_update_release_notes(repo, branch, cur, remote)
+                    out.update(notes)
+                except Exception as ex:
+                    out["update_notes_error"] = str(ex)[:300]
         except Exception as ex:
             out["update_check_error"] = str(ex)[:500]
         return out
@@ -1913,7 +2565,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _write_text(self._mtproto_prefs_path(), json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
 
     def _tunnel_iface_for_mtproto(self) -> str:
-        return "awg-uplink"
+        return self._active_tunnel_ifname()
 
     def _load_iface_env_values(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -1946,7 +2598,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "curl",
                     "-4",
                     "--interface",
-                    "awg-uplink",
+                    self._active_tunnel_ifname(),
                     "--connect-timeout",
                     "2",
                     "--max-time",
@@ -2066,7 +2718,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         self._store_geo_config(cfg.get("geo", {}))
         self._store_iface_config(cfg)
         self._write_iface_env(cfg)
-        self._apply_iface_routing()
+        self._apply_iface_routing(cfg)
         self._apply_geo_ip_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
         self._apply_geo_domain_runtime(cfg, run_refresh_now=bool(body.get("apply_geo_ip_refresh")))
         try:
@@ -2076,11 +2728,16 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         runtime = self._routing_runtime_status(cfg)
         if not runtime.get("applied"):
             raise RuntimeError("routing not applied")
+        loaded = self._load_iface_config()
+        if isinstance(loaded, dict):
+            loaded = dict(loaded)
+            loaded["geo"] = self._load_geo_config()
+            loaded["firewall"] = self._iface_firewall_for_response(loaded)
+        else:
+            loaded = {}
         resp = {
             "ok": True,
-            "config": (lambda x: (dict(x) | {"geo": self._load_geo_config()}) if isinstance(x, dict) else {})(
-                self._load_iface_config()
-            ),
+            "config": loaded,
             "runtime": runtime,
             "config_dir": self._webui_cfg_dir(),
         }
@@ -2105,7 +2762,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         cfg["geo"] = self._load_geo_config()
         self._store_iface_config(cfg)
         self._write_iface_env(cfg)
-        self._apply_iface_routing()
+        self._apply_iface_routing(cfg)
         self._apply_geo_ip_runtime(cfg)
         self._apply_geo_domain_runtime(cfg)
         try:
@@ -2142,7 +2799,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if isinstance(cfg, dict) and cfg:
             cfg["geo"] = self._load_geo_config()
             self._write_iface_env(cfg)
-            self._apply_iface_routing()
+            self._apply_iface_routing(cfg)
             self._apply_geo_ip_runtime(cfg, run_refresh_now=False)
             self._apply_geo_domain_runtime(cfg, run_refresh_now=False)
             try:
@@ -2724,7 +3381,14 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if sp == "/api/status/awg-uplink":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
-            return self._api_status_awg()
+            q = parse_qs(urlparse(self.path).query)
+            tid = (q.get("tunnel_id") or ["tunnel1"])[0]
+            return self._api_status_awg(str(tid))
+
+        if sp == "/api/tunnels/config":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            return self._api_tunnels_config()
 
         if sp == "/api/metrics/system":
             if self._auth_enabled and not self._session_user():
@@ -2916,20 +3580,23 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             cfg_text = str(body.get("config_text", ""))
             if not cfg_text.strip():
                 return self._send_text(400, "config_text is empty")
+            tunnel_id = self._tunnel_id_from_body(body)
+            ifname = self._tunnel_ifname(tunnel_id)
             try:
                 ok, verr = _validate_tunnel_config(cfg_text)
                 if not ok:
                     return self._send_text(400, f"tunnel config validation failed: {verr}")
                 sanitized = _sanitize_tunnel_config(cfg_text)
-                conf_path = Path("/etc/amnezia/amneziawg/awg-uplink.conf")
+                conf_path = Path(f"/etc/amnezia/amneziawg/{ifname}.conf")
                 _mkdir(str(conf_path.parent))
                 _write_text(str(conf_path), sanitized)
                 os.chmod(str(conf_path), 0o600)
-                _run(["systemctl", "daemon-reload"], timeout=3.0)
-                _run(["systemctl", "enable", "awg-quick@awg-uplink.service"], timeout=3.0)
-                rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=10.0)
-                if rc != 0:
-                    return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
+                tcfg = self._load_tunnels_config()
+                tcfg[tunnel_id]["enabled"] = True
+                act = str(tcfg.get("active") or "tunnel1")
+                if act not in ("tunnel1", "tunnel2") or not tcfg.get(act, {}).get("enabled"):
+                    tcfg["active"] = tunnel_id
+                self._store_tunnels_config(tcfg)
                 routing_err = ""
                 try:
                     self._apply_iface_routing()
@@ -2937,7 +3604,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     routing_err = str(ex)
                 payload = {
                     "ok": True,
-                    "path": "/etc/amnezia/amneziawg/awg-uplink.conf",
+                    "tunnel_id": tunnel_id,
+                    "ifname": ifname,
+                    "path": str(conf_path),
                 }
                 if routing_err:
                     payload["routing_apply_error"] = routing_err
@@ -2961,18 +3630,43 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if sp == "/api/tunnel/restart":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
-            rc, out, err = _run(["systemctl", "restart", "awg-quick@awg-uplink.service"], timeout=12.0)
+            body = self._read_json_body()
+            tunnel_id = self._tunnel_id_from_body(body if isinstance(body, dict) else {})
+            ifname = self._tunnel_ifname(tunnel_id)
+            tcfg = self._load_tunnels_config()
+            if not tcfg.get(tunnel_id, {}).get("enabled"):
+                return self._send_text(400, f"{tunnel_id} disabled — enable tunnel in panel first")
+            unit = f"awg-quick@{ifname}.service"
+            rc, out, err = _run(["systemctl", "restart", unit], timeout=12.0)
             if rc != 0:
-                return self._send_text(500, (err or out or "failed to restart awg-quick@awg-uplink").strip())
+                return self._send_text(500, (err or out or f"failed to restart {unit}").strip())
             routing_err = ""
             try:
                 self._apply_iface_routing()
             except Exception as ex:
                 routing_err = str(ex)
-            resp = {"ok": True}
+            resp = {"ok": True, "tunnel_id": tunnel_id, "ifname": ifname}
             if routing_err:
                 resp["routing_apply_error"] = routing_err
             return self._send_json(200, resp)
+
+        if sp == "/api/tunnel/delete":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            try:
+                return self._send_json(200, self._op_tunnel_delete(body))
+            except Exception as ex:
+                return self._send_text(500, str(ex))
+
+        if sp == "/api/tunnels/save":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            try:
+                return self._send_json(200, self._op_tunnels_save(body))
+            except Exception as ex:
+                return self._send_text(500, str(ex))
 
         if sp == "/api/mtproto/outbound/set":
             if self._auth_enabled and not self._session_user():

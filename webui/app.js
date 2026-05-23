@@ -130,13 +130,35 @@ function setOptions(selectEl, options, preferred) {
   }
 }
 
-function setTunnelStatus(kind, text) {
-  const root = $("tunnelStatus");
+function setTunnelLineStatus(tunnelId, kind, text) {
+  const root = document.getElementById(`${tunnelId}Status`);
+  if (!root) return;
   const dot = root.querySelector(".dot");
   const statusText = root.querySelector(".status-text");
+  if (!dot || !statusText) return;
   dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad", "dot--muted");
   dot.classList.add(kind);
   statusText.textContent = text;
+}
+
+function setTunnelPingLine(tunnelId, text, kind) {
+  const el = document.querySelector(`.tunnel-ping-line[data-tunnel-id="${tunnelId}"]`);
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.remove("is-bad", "is-ok", "is-warn");
+  if (kind) el.classList.add(kind);
+}
+
+function setTunnelFailoverStatus(kind, text) {
+  const root = $("tunnelFailoverStatus");
+  if (!root) return;
+  const dot = root.querySelector(".dot");
+  const statusText = $("tunnelFailoverStatusText") || root.querySelector(".status-text");
+  if (dot) {
+    dot.classList.remove("dot--unknown", "dot--ok", "dot--warn", "dot--bad", "dot--muted");
+    dot.classList.add(kind);
+  }
+  if (statusText) statusText.textContent = text;
 }
 
 function setStatusById(rootId, kind, text) {
@@ -325,12 +347,62 @@ function initWebUiUpdateBanner() {
     }
   }
 
+  function renderWebUiUpdateChanges(inf) {
+    const labelEl = $("webuiUpdateChangesLabel");
+    const box = $("webuiUpdateChanges");
+    if (!labelEl || !box) return;
+    const changelog = String((inf && inf.changelog) || "").trim();
+    const commits = Array.isArray(inf && inf.commits) ? inf.commits : [];
+    box.textContent = "";
+    box.classList.add("hidden");
+    labelEl.hidden = true;
+    if (changelog) {
+      labelEl.hidden = false;
+      box.classList.remove("hidden");
+      box.textContent = changelog;
+      return;
+    }
+    if (commits.length) {
+      labelEl.hidden = false;
+      const cur = String((inf && inf.current) || "").trim();
+      const lat = String((inf && inf.latest) || "").trim();
+      labelEl.textContent =
+        cur && lat
+          ? `Коммиты (${cur} → ${lat}, ${commits.length})`
+          : commits.length > 1
+            ? `Коммиты (${commits.length})`
+            : "Коммит";
+      box.classList.remove("hidden");
+      box.classList.remove("webui-update-changes--pre");
+      for (const c of commits) {
+        const row = document.createElement("div");
+        row.className = "webui-update-commit";
+        const sha = String(c.sha || "").trim();
+        const msg = String(c.message || "").trim();
+        row.textContent = "";
+        const msgSpan = document.createElement("span");
+        msgSpan.textContent = msg || "—";
+        row.appendChild(msgSpan);
+        if (sha) {
+          row.appendChild(document.createTextNode(" "));
+          const code = document.createElement("code");
+          code.textContent = sha;
+          row.appendChild(code);
+        }
+        box.appendChild(row);
+      }
+    }
+  }
+
   function openWebUiUpdateModal() {
     const inf = window.__awgUpdateInfo || {};
     $("webuiUpdateCurrentVer").textContent = inf.current || "—";
     $("webuiUpdateLatestVer").textContent = inf.latest || "—";
     $("webuiUpdateRepoLabel").textContent = inf.repo || "—";
     $("webuiUpdateBranchLabel").textContent = inf.branch || "main";
+    const changesLabel = $("webuiUpdateChangesLabel");
+    if (changesLabel) changesLabel.textContent = "Изменения";
+    renderWebUiUpdateChanges(inf);
     syncApplyEnabled();
     overlay.classList.remove("hidden");
     overlay.setAttribute("aria-hidden", "false");
@@ -398,38 +470,173 @@ function initAmneziaSetupBanner() {
   });
 }
 
-function initImportModal(state) {
-  const help = $("confHelp");
-  const applyBtn = $("importApplyBtn");
-  const fileInput = $("confFileInput");
-  const chooseFileBtn = $("chooseFileBtn");
-  const openTextBtn = $("openImportModalBtn");
-  const restartBtn = $("restartTunnelBtn");
+function tunnelDraft(state, tunnelId) {
+  if (!state.tunnelDraft) state.tunnelDraft = {};
+  if (!state.tunnelDraft[tunnelId]) state.tunnelDraft[tunnelId] = { importMode: "", confText: "" };
+  return state.tunnelDraft[tunnelId];
+}
 
-  function render() {
-    const hasText = Boolean((state.confText || "").trim());
-    const f = fileInput.files && fileInput.files[0];
-    const hasFile = Boolean(f);
-    const mode = state.importMode || (hasText ? "text" : hasFile ? "file" : "");
+function clearTunnelImportDraft(state, tunnelId) {
+  const draft = tunnelDraft(state, tunnelId);
+  draft.confText = "";
+  draft.importMode = "";
+  const fileInput = document.querySelector(`.tunnel-file-input[data-tunnel-id="${tunnelId}"]`);
+  if (fileInput) fileInput.value = "";
+  if (state && state.importTunnelId === tunnelId && $("confText")) $("confText").value = "";
+}
 
-    if (mode === "text" && hasText) {
-      help.textContent = `Готово к импорту: текст (${(state.confText || "").trim().length} символов).`;
-      applyBtn.disabled = false;
-      return;
-    }
-    if (mode === "file" && hasFile) {
-      help.textContent = `Готово к импорту: файл (${f.name}).`;
-      applyBtn.disabled = false;
-      return;
-    }
-    help.textContent = "Конфиг не задан.";
-    applyBtn.disabled = true;
+function tunnelImportPayload(state, tunnelId) {
+  const draft = tunnelDraft(state, tunnelId);
+  const fileInput = document.querySelector(`.tunnel-file-input[data-tunnel-id="${tunnelId}"]`);
+  const hasText = Boolean((draft.confText || "").trim());
+  const f = fileInput && fileInput.files && fileInput.files[0];
+  const hasFile = Boolean(f);
+  const mode = draft.importMode || (hasText ? "text" : hasFile ? "file" : "");
+  if (mode === "text" && hasText) {
+    return { ready: true, kind: "text", len: draft.confText.trim().length };
   }
+  if (mode === "file" && hasFile) {
+    return { ready: true, kind: "file", name: f.name };
+  }
+  return { ready: false, mode };
+}
 
-  openTextBtn.addEventListener("click", () => {
-    $("confText").value = state.confText || "";
-    openModal();
-  });
+function renderTunnelImportHelp(state, tunnelId, tunnelMeta = null) {
+  const help = document.querySelector(`.tunnel-help[data-tunnel-id="${tunnelId}"]`);
+  const btn = document.querySelector(`.tunnel-import-btn[data-tunnel-id="${tunnelId}"]`);
+  if (!help || !btn) return;
+  const payload = tunnelImportPayload(state, tunnelId);
+  const t = tunnelMeta && typeof tunnelMeta === "object" ? tunnelMeta : {};
+  if (payload.ready) {
+    if (payload.kind === "text") {
+      help.textContent = `Готово к импорту: текст (${payload.len} символов).`;
+    } else {
+      help.textContent = `Готово к импорту: файл (${payload.name}).`;
+    }
+    btn.disabled = false;
+    btn.classList.add("is-ready");
+    applyTunnelRestartButton(tunnelId, t);
+    return;
+  }
+  const draft = tunnelDraft(state, tunnelId);
+  if (draft.importMode) draft.importMode = "";
+  if (t.configured && t.ifname) {
+    help.textContent = `Конфиг: /etc/amnezia/amneziawg/${t.ifname}.conf`;
+  } else {
+    help.textContent = "Конфиг не задан.";
+  }
+  btn.disabled = true;
+  btn.classList.remove("is-ready");
+  applyTunnelRestartButton(tunnelId, t);
+}
+
+function applyTunnelToggles(cfg) {
+  for (const tid of ["tunnel1", "tunnel2"]) {
+    const t = (cfg.tunnels && cfg.tunnels[tid]) || {};
+    const el = document.getElementById(tid === "tunnel1" ? "tunnel1Enabled" : "tunnel2Enabled");
+    if (!el) continue;
+    const label = el.closest("label.toggle-switch");
+    el.checked = Boolean(t.enabled);
+    el.disabled = Boolean(t.toggle_locked);
+    if (label) {
+      label.classList.toggle("is-locked", Boolean(t.toggle_locked));
+      label.title = t.toggle_lock_reason || "";
+    }
+  }
+}
+
+function applyTunnelDeleteButtons(cfg) {
+  for (const tid of ["tunnel1", "tunnel2"]) {
+    const btn = document.querySelector(`.tunnel-delete-btn[data-tunnel-id="${tid}"]`);
+    if (!btn) continue;
+    const t = (cfg.tunnels && cfg.tunnels[tid]) || {};
+    const locked = Boolean(t.delete_locked);
+    btn.disabled = locked;
+    btn.title =
+      t.delete_lock_reason ||
+      (locked ? "" : "Удалить файл конфигурации и остановить туннель");
+  }
+}
+
+function applyTunnelRestartButton(tunnelId, tunnelMeta = null) {
+  const btn = document.querySelector(`.tunnel-restart-btn[data-tunnel-id="${tunnelId}"]`);
+  if (!btn) return;
+  const t = tunnelMeta && typeof tunnelMeta === "object" ? tunnelMeta : {};
+  const canRestart = Boolean(t.configured && t.enabled);
+  btn.disabled = !canRestart;
+  btn.title = canRestart
+    ? "Перезапустить awg-quick для этого туннеля"
+    : t.configured
+      ? "Туннель выключен — включите переключатель"
+      : "Сначала импортируйте конфиг (.conf)";
+}
+
+function buildTunnelSaveBody() {
+  const iv = parseInt($("tunnelHealthInterval") && $("tunnelHealthInterval").value, 10);
+  return {
+    tunnel1: {
+      enabled: Boolean($("tunnel1Enabled") && $("tunnel1Enabled").checked),
+    },
+    tunnel2: {
+      enabled: Boolean($("tunnel2Enabled") && $("tunnel2Enabled").checked),
+    },
+    health: {
+      targets: $("tunnelHealthTargets") ? $("tunnelHealthTargets").value : "",
+      interval_sec: Number.isFinite(iv) ? Math.max(5, iv) : 30,
+    },
+  };
+}
+
+async function saveTunnelSettings(state, options = {}) {
+  const { silent = false, skipBusy = false } = options;
+  const body = buildTunnelSaveBody();
+  const run = async () => postJson("/api/tunnels/save", body);
+  const res = skipBusy ? await run() : await withBusyOverlay("Сохраняем проверку связи…", run);
+  if (res && res.config) {
+    applyTunnelsConfigToForm(res.config);
+  } else {
+    await refreshTunnelsState(state, { skipFormApply: false });
+  }
+  if (!silent) toast("Параметры проверки связи сохранены.", "ok");
+  return res;
+}
+
+function applyTunnelsConfigToForm(cfg) {
+  applyTunnelToggles(cfg);
+  applyTunnelDeleteButtons(cfg);
+  for (const tid of ["tunnel1", "tunnel2"]) {
+    applyTunnelRestartButton(tid, (cfg.tunnels && cfg.tunnels[tid]) || {});
+  }
+  const h = cfg.health || {};
+  if ($("tunnelHealthTargets")) {
+    $("tunnelHealthTargets").value = Array.isArray(h.targets) ? h.targets.join(", ") : "1.1.1.1, 8.8.8.8";
+  }
+  const intervalEl = $("tunnelHealthInterval");
+  if (intervalEl && document.activeElement !== intervalEl) {
+    intervalEl.value = h.interval_sec || 30;
+  }
+  for (const tid of ["tunnel1", "tunnel2"]) {
+    const panel = document.querySelector(`.tunnel-panel[data-tunnel-id="${tid}"]`);
+    const t = (cfg.tunnels && cfg.tunnels[tid]) || {};
+    if (panel) panel.classList.toggle("is-active", Boolean(t.is_active));
+    const title = panel && panel.querySelector(".tunnel-ifname");
+    if (title && t.ifname) title.textContent = `(${t.ifname})`;
+  }
+}
+
+function initDualTunnels(state) {
+  state.importTunnelId = "tunnel1";
+  state.tunnelDraft = { tunnel1: { importMode: "", confText: "" }, tunnel2: { importMode: "", confText: "" } };
+
+  for (const btn of document.querySelectorAll(".tunnel-open-text")) {
+    btn.addEventListener("click", () => {
+      const tid = btn.getAttribute("data-tunnel-id") || "tunnel1";
+      state.importTunnelId = tid;
+      const draft = tunnelDraft(state, tid);
+      $("confText").value = draft.confText || "";
+      openModal();
+    });
+  }
   $("importModalCloseBtn").addEventListener("click", closeModal);
   $("importModalCancelBtn").addEventListener("click", closeModal);
   $("importModalOverlay").addEventListener("click", (ev) => {
@@ -438,62 +645,223 @@ function initImportModal(state) {
   window.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") closeModal();
   });
-
   $("importModalSaveBtn").addEventListener("click", () => {
-    state.confText = $("confText").value;
-    state.importMode = "text";
+    const tid = state.importTunnelId || "tunnel1";
+    const draft = tunnelDraft(state, tid);
+    draft.confText = $("confText").value;
+    draft.importMode = "text";
     closeModal();
-    render();
+    renderTunnelImportHelp(state, tid);
   });
 
-  chooseFileBtn.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", () => {
-    state.importMode = "file";
-    state.confText = "";
-    render();
-  });
-
-  $("importApplyBtn").addEventListener("click", async () => {
-    try {
-      let cfgText = "";
-      const f = fileInput.files && fileInput.files[0];
-      if (state.importMode === "file" && f) {
-        cfgText = await f.text();
-      } else {
-        cfgText = String(state.confText || "");
-      }
-      if (!cfgText.trim()) {
-        toast("Конфиг не задан.", "error", 2200);
+  for (const btn of document.querySelectorAll(".tunnel-choose-file")) {
+    btn.addEventListener("click", () => {
+      const tid = btn.getAttribute("data-tunnel-id") || "tunnel1";
+      const inp = document.querySelector(`.tunnel-file-input[data-tunnel-id="${tid}"]`);
+      if (inp) inp.click();
+    });
+  }
+  for (const inp of document.querySelectorAll(".tunnel-file-input")) {
+    inp.addEventListener("change", () => {
+      const tid = inp.getAttribute("data-tunnel-id") || "tunnel1";
+      const draft = tunnelDraft(state, tid);
+      const f = inp.files && inp.files[0];
+      if (!f) {
+        draft.importMode = "";
+        draft.confText = "";
+        renderTunnelImportHelp(state, tid);
         return;
       }
-      setTunnelStatus("dot--warn", "Туннель awg-uplink: импорт конфигурации");
-      await withBusyOverlay("Импортируем конфигурацию туннеля…", async () => {
-        await postJson("/api/tunnel/validate", { config_text: cfgText });
-        await postJson("/api/tunnel/import", { config_text: cfgText });
-      });
-      toast("Конфиг туннеля awg-uplink импортирован.", "ok");
-      await refreshTunnelStatus(state);
-    } catch (e) {
-      setTunnelStatus("dot--bad", "Туннель awg-uplink: ошибка импорта");
-      toast(`Ошибка импорта: ${e?.message || "unknown"}`, "error", 3000);
-    }
-  });
+      draft.importMode = "file";
+      draft.confText = "";
+      renderTunnelImportHelp(state, tid);
+    });
+  }
 
-  restartBtn.addEventListener("click", async () => {
+  for (const btn of document.querySelectorAll(".tunnel-import-btn")) {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      const tid = btn.getAttribute("data-tunnel-id") || "tunnel1";
+      const draft = tunnelDraft(state, tid);
+      const fileInput = document.querySelector(`.tunnel-file-input[data-tunnel-id="${tid}"]`);
+      try {
+        let cfgText = "";
+        const f = fileInput && fileInput.files && fileInput.files[0];
+        if (draft.importMode === "file" && f) cfgText = await f.text();
+        else cfgText = String(draft.confText || "");
+        if (!cfgText.trim()) {
+          toast("Конфиг не задан.", "error", 2200);
+          renderTunnelImportHelp(state, tid);
+          return;
+        }
+        setTunnelLineStatus(tid, "dot--warn", "импорт…");
+        await withBusyOverlay(`Импорт ${tid}…`, async () => {
+          await postJson("/api/tunnel/validate", { config_text: cfgText, tunnel_id: tid });
+          await postJson("/api/tunnel/import", { config_text: cfgText, tunnel_id: tid });
+        });
+        clearTunnelImportDraft(state, tid);
+        toast(`Конфиг ${tid} импортирован.`, "ok");
+        await refreshTunnelsState(state);
+      } catch (e) {
+        setTunnelLineStatus(tid, "dot--bad", "ошибка импорта");
+        toast(`Ошибка импорта: ${e?.message || "unknown"}`, "error", 3000);
+      }
+    });
+  }
+
+  for (const btn of document.querySelectorAll(".tunnel-restart-btn")) {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      const tid = btn.getAttribute("data-tunnel-id") || "tunnel1";
+      try {
+        setTunnelLineStatus(tid, "dot--warn", "перезапуск…");
+        await withBusyOverlay(`Перезапуск ${tid}…`, async () => {
+          await postJson("/api/tunnel/restart", { tunnel_id: tid });
+        });
+        toast(`Туннель ${tid} перезапущен.`, "ok");
+        await refreshTunnelsState(state);
+      } catch (e) {
+        setTunnelLineStatus(tid, "dot--bad", "ошибка перезапуска");
+        toast(`Ошибка: ${e?.message || "unknown"}`, "error", 2800);
+      }
+    });
+  }
+
+  for (const btn of document.querySelectorAll(".tunnel-delete-btn")) {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      const tid = btn.getAttribute("data-tunnel-id") || "tunnel1";
+      const panel = document.querySelector(`.tunnel-panel[data-tunnel-id="${tid}"]`);
+      const ifname =
+        (panel && panel.querySelector(".tunnel-ifname") && panel.querySelector(".tunnel-ifname").textContent) ||
+        tid;
+      const msg = `Удалить конфигурацию ${ifname}?\n\nФайл .conf будет удалён, туннель остановлен и отключён.`;
+      if (!window.confirm(msg)) return;
+      try {
+        setTunnelLineStatus(tid, "dot--warn", "удаление…");
+        const res = await withBusyOverlay(`Удаление ${tid}…`, async () =>
+          postJson("/api/tunnel/delete", { tunnel_id: tid })
+        );
+        clearTunnelImportDraft(state, tid);
+        if (res && res.config) {
+          applyTunnelsConfigToForm(res.config);
+        }
+        toast(`Конфиг ${tid} удалён.`, "ok");
+        await refreshTunnelsState(state, { skipFormApply: Boolean(res && res.config) });
+      } catch (e) {
+        setTunnelLineStatus(tid, "dot--bad", "ошибка удаления");
+        toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3000);
+      }
+    });
+  }
+
+  $("tunnelSettingsSaveBtn").addEventListener("click", async () => {
     try {
-      setTunnelStatus("dot--warn", "Туннель awg-uplink: перезапуск");
-      await withBusyOverlay("Перезапускаем туннель…", async () => {
-        await postJson("/api/tunnel/restart", {});
-      });
-      toast("Туннель awg-uplink перезапущен.", "ok");
-      await refreshTunnelStatus(state);
+      await saveTunnelSettings(state);
+      await refreshTunnelsState(state);
     } catch (e) {
-      setTunnelStatus("dot--bad", "Туннель awg-uplink: ошибка перезапуска");
-      toast(`Ошибка перезапуска: ${e?.message || "unknown"}`, "error", 2800);
+      toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3000);
     }
   });
 
-  render();
+  for (const el of [$("tunnel1Enabled"), $("tunnel2Enabled")]) {
+    if (!el) continue;
+    el.addEventListener("change", async () => {
+      if (el.disabled) return;
+      try {
+        await saveTunnelSettings(state, { silent: true, skipBusy: true });
+        await refreshTunnelsState(state, { skipFormApply: true });
+      } catch (e) {
+        toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3000);
+        await refreshTunnelsState(state);
+      }
+    });
+  }
+
+  const intervalEl = $("tunnelHealthInterval");
+  if (intervalEl) {
+    intervalEl.addEventListener("change", async () => {
+      try {
+        await saveTunnelSettings(state, { silent: true, skipBusy: true });
+      } catch (e) {
+        toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3000);
+      }
+    });
+  }
+
+  for (const tid of ["tunnel1", "tunnel2"]) renderTunnelImportHelp(state, tid);
+}
+
+async function refreshTunnelsState(state = null, options = {}) {
+  try {
+    const cfg = await fetchJson("/api/tunnels/config");
+    if (!cfg) return;
+    if (!options.skipFormApply) {
+      applyTunnelsConfigToForm(cfg);
+    }
+    const activeId = cfg.active || "tunnel1";
+    let activeUp = false;
+    for (const tid of ["tunnel1", "tunnel2"]) {
+      const st = await fetchJson(`/api/status/awg-uplink?tunnel_id=${encodeURIComponent(tid)}`);
+      const t = (cfg.tunnels && cfg.tunnels[tid]) || {};
+      const label = t.ifname || tid;
+      const activeMark = t.is_active || (st && st.is_active) ? " · активный для трафика" : "";
+      const pingStatus = t.ping_status || "";
+      const pingChecked = Boolean(t.ping_checked);
+      const pingOk = t.ping_ok;
+
+      if (!t.enabled) {
+        setTunnelLineStatus(tid, "dot--muted", `${label}: выкл`);
+        setTunnelPingLine(tid, "", null);
+        continue;
+      }
+
+      if (!t.configured && !(st && st.configured)) {
+        setTunnelLineStatus(tid, "dot--bad", `${label}: не настроен`);
+        setTunnelPingLine(tid, "", null);
+        continue;
+      }
+
+      const up = Boolean(st && st.exists && st.state === "UP");
+      const trafficOk = !(pingChecked && pingOk === false);
+      if (tid === activeId && up && trafficOk) activeUp = true;
+
+      if (!up) {
+        setTunnelLineStatus(tid, "dot--warn", `${label}: ${(st && st.state) || "DOWN"}${activeMark}`);
+        setTunnelPingLine(tid, pingChecked ? pingStatus : "интерфейс DOWN — ping не выполнялся", pingChecked && !pingOk ? "is-bad" : "is-warn");
+      } else if (pingChecked && pingOk === false) {
+        setTunnelLineStatus(tid, "dot--bad", `${label}: UP · нет связи${activeMark}`);
+        setTunnelPingLine(tid, pingStatus, "is-bad");
+      } else if (pingChecked && pingOk === true) {
+        setTunnelLineStatus(tid, "dot--ok", `${label}: UP${activeMark}`);
+        setTunnelPingLine(tid, pingStatus, "is-ok");
+      } else {
+        setTunnelLineStatus(tid, "dot--warn", `${label}: UP · ${pingStatus || "проверка…"}${activeMark}`);
+        setTunnelPingLine(tid, pingStatus || "ожидает проверки ping", "is-warn");
+      }
+
+      if (state) renderTunnelImportHelp(state, tid, t);
+    }
+    if (state) state.tunnelUp = activeUp;
+    setRoutingAvailability(activeUp, state);
+    if (state && typeof state.refreshGeoUi === "function") state.refreshGeoUi();
+    if (state) await refreshMtprotoState(state);
+    const act = cfg.tunnels && cfg.tunnels[cfg.active];
+    const interval = (cfg.health && cfg.health.interval_sec) || 30;
+    if (cfg.failover_enabled) {
+      setTunnelFailoverStatus("dot--ok", `ping каждые ${interval} с · failover (${act && act.ifname ? act.ifname : cfg.active})`);
+    } else if (cfg.health_watch_enabled) {
+      setTunnelFailoverStatus("dot--ok", `ping каждые ${interval} с · один туннель`);
+    } else {
+      setTunnelFailoverStatus("dot--warn", "нет включённого туннеля");
+    }
+  } catch {
+    if (state) state.tunnelUp = false;
+    setRoutingAvailability(false, state);
+    if (state && typeof state.refreshGeoUi === "function") state.refreshGeoUi();
+    setTunnelFailoverStatus("dot--bad", "ошибка статуса");
+    for (const tid of ["tunnel1", "tunnel2"]) setTunnelLineStatus(tid, "dot--unknown", "ошибка");
+  }
 }
 
 async function fetchJson(path) {
@@ -506,17 +874,61 @@ async function fetchJson(path) {
   return await res.json();
 }
 
-function setRoutingAvailability(enabled) {
+function setRoutingNoTunnelStatus() {
+  setStatusById(
+    "routingModeStatus",
+    "dot--warn",
+    "Нет рабочего туннельного интерфейса. Проверьте туннельные интерфейсы или переключите на Egress."
+  );
+}
+
+function setRoutingAvailability(tunnelModesEnabled, state) {
   const root = $("routingModes");
   for (const btn of root.querySelectorAll(".routing-mode-btn")) {
-    btn.disabled = !enabled;
+    const mode = btn.getAttribute("data-route-mode") || "";
+    // Egress всегда доступен — при обрыве туннеля можно уйти на прямой выход.
+    btn.disabled = mode !== "egress" && !tunnelModesEnabled;
   }
-  if (!enabled) {
-    setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
+  if (state) syncRoutingModeStatus(state);
+}
+
+/** Обновить строку статуса режима маршрутизации по текущему UI и состоянию туннеля. */
+function syncRoutingModeStatus(state) {
+  if (!state) return;
+  if (!state.tunnelUp) {
+    syncRoutingModeStatusWhenTunnelDown(state);
+    return;
+  }
+  const mode = state.routeMode || "egress";
+  if (mode === "georouting") {
+    if (state.persistedRouteMode === "georouting") {
+      setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
+    } else {
+      setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
+    }
+    return;
+  }
+  setRouteModeStatus(mode, state.persistedRouteMode === mode);
+}
+
+/** Статус режима маршрутизации, когда активный туннель не работает (DOWN / нет ping). */
+function syncRoutingModeStatusWhenTunnelDown(state) {
+  const uiMode = (state && state.routeMode) || "egress";
+  const persisted = (state && state.persistedRouteMode) || "egress";
+  // На сервере может остаться georouting/tunnel, но без рабочего туннеля трафик не пойдёт.
+  if (uiMode === "egress" && persisted === "egress") {
+    setRouteModeStatus("egress", true);
+  } else {
+    setRoutingNoTunnelStatus();
   }
 }
 
 function setRouteModeStatus(mode, applied = true) {
+  const st = window.__awgState;
+  if (st && !st.tunnelUp && mode !== "egress") {
+    syncRoutingModeStatusWhenTunnelDown(st);
+    return;
+  }
   if (!applied) {
     setStatusById("routingModeStatus", "dot--warn", `не применено: ${routeModeLabel(mode)}`);
     return;
@@ -545,25 +957,6 @@ function setInterfaceConfigGateLocked(locked) {
   overlay.classList.toggle("hidden", !locked);
 }
 
-async function refreshTunnelStatus(state = null) {
-  try {
-    const st = await fetchJson("/api/status/awg-uplink");
-    if (!st) return;
-    const up = Boolean(st.exists && st.state === "UP");
-    if (state) state.tunnelUp = up;
-    setRoutingAvailability(up);
-    if (!st.exists)
-      return setTunnelStatus("dot--bad", st.configured ? "Туннель awg-uplink: DOWN" : "Туннель awg-uplink: не настроен");
-    const op = st.operstate && st.operstate !== "UNKNOWN" ? st.operstate : "";
-    if (st.state === "UP") return setTunnelStatus("dot--ok", `Туннель awg-uplink: UP${op ? ` (${op})` : ""}`);
-    const base = st.state || "UNKNOWN";
-    return setTunnelStatus("dot--warn", `Туннель awg-uplink: ${base}${op ? ` (${op})` : ""}`);
-  } catch {
-    if (state) state.tunnelUp = false;
-    setRoutingAvailability(false);
-    setTunnelStatus("dot--unknown", "Туннель awg-uplink: ошибка статуса");
-  }
-}
 
 async function refreshSystemMetrics(state) {
   try {
@@ -628,6 +1021,8 @@ async function refreshSystemMetrics(state) {
       canApply: Boolean(m.update_can_apply),
       blocked: m.update_apply_blocked_reason || "",
       checkError: m.update_check_error || "",
+      changelog: m.update_changelog || "",
+      commits: Array.isArray(m.update_commits) ? m.update_commits : [],
     };
     applyAppVersionLabels(m.update_current_version);
 
@@ -905,10 +1300,10 @@ async function refreshMtprotoState(state) {
     }
     setMtprotoPanelLocked(!cfgOk);
     const up = s.upstream || {};
+    const outboundMode = up.mode === "egress" ? "egress" : up.mode === "tunnel" ? "tunnel" : "direct";
     const ob = $("mtpOutboundMode");
     if (ob) {
-      const m = up.mode === "egress" ? "egress" : up.mode === "tunnel" ? "tunnel" : "direct";
-      ob.value = m;
+      ob.value = outboundMode;
       ob.disabled = !cfgOk;
     }
     const om = $("mtpOutboundMeta");
@@ -919,8 +1314,23 @@ async function refreshMtprotoState(state) {
       parts.push(`egress ${up.egress_dev || "—"} · ingress ${up.ingress_dev || "—"}`);
       const cfgIf = String(up.tunnel_interface_config || "").trim();
       if (cfgIf) parts.push(`[upstream.tunnel] ${cfgIf}`);
-      if (up.tunnel_iface_up === false) parts.push("туннель awg-uplink не UP");
+      if (up.tunnel_iface_up === false) parts.push("туннель не UP");
       om.textContent = parts.join(" · ");
+    }
+    const tunnelOutboundBroken =
+      outboundMode === "tunnel" && (!state.tunnelUp || up.tunnel_iface_up === false);
+    if ($("mtpOutboundStatus")) {
+      if (tunnelOutboundBroken) {
+        setStatusById(
+          "mtpOutboundStatus",
+          "dot--bad",
+          "Туннельный интерфейс не работает — проверьте туннели или переключите исходящий на Egress"
+        );
+      } else if (outboundMode === "tunnel" && state.tunnelUp) {
+        setStatusById("mtpOutboundStatus", "dot--ok", "Туннельный интерфейс активен");
+      } else {
+        setStatusById("mtpOutboundStatus", "dot--muted", "—");
+      }
     }
 
     const users = s.users || [];
@@ -1026,6 +1436,7 @@ async function refreshMtprotoState(state) {
     setHealthRowStatus("mtpMaskNginxStatus", "dot--bad", "ошибка загрузки");
     setHealthRowStatus("mtpMaskTimerStatus", "dot--bad", "ошибка загрузки");
     setStatusById("mtpConfigStatus", "dot--bad", "ошибка загрузки");
+    if ($("mtpOutboundStatus")) setStatusById("mtpOutboundStatus", "dot--bad", "ошибка загрузки");
   }
 }
 
@@ -1413,9 +1824,11 @@ function initMtprotoPanel(state) {
         const ws = res && res.warnings;
         if (ws && ws.length) toast(ws.join(" "), "warn", 5200);
         await refreshMtprotoState(state);
+        await refreshTunnelsState(state);
       } catch (e) {
         toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3200);
         await refreshMtprotoState(state);
+        await refreshTunnelsState(state);
       }
     });
   }
@@ -1573,6 +1986,45 @@ function initMtprotoPanel(state) {
   });
 }
 
+function ifaceIngressSplitActive(cfg) {
+  const ed = String((cfg && cfg.egress_dev) || $("egressDev")?.value || "").trim();
+  const eip = String((cfg && cfg.egress_ip) || $("egressIp")?.value || "").trim();
+  const id = String((cfg && cfg.ingress_dev) || $("ingressDev")?.value || "").trim();
+  const iip = String((cfg && cfg.ingress_ip) || $("ingressIp")?.value || "").trim();
+  return Boolean(iip && id && (iip !== eip || id !== ed));
+}
+
+function updateIfaceFwReservedUI(fw, cfg) {
+  const note = $("ifaceFwReservedNote");
+  const chips = $("ifaceFwReservedPorts");
+  const ingField = $("ifaceFwIngressField");
+  if (!note || !chips) return;
+  const reserved = Array.isArray(fw && fw.reserved_tcp_ports) ? fw.reserved_tcp_ports : [];
+  const applyOn =
+    fw && fw.reserved_apply_on === "ingress"
+      ? "ingress"
+      : fw && fw.reserved_apply_on === "egress"
+        ? "egress"
+        : ifaceIngressSplitActive(cfg)
+          ? "ingress"
+          : "egress";
+  chips.textContent = reserved.length ? reserved.join(", ") : "80, 443, 5000";
+  const ifaceLabel = applyOn === "ingress" ? "ingress" : "egress";
+  note.textContent = `Порты ${chips.textContent} всегда открыты на интерфейсе ${ifaceLabel} (ingress=egress — на egress).`;
+  if (ingField) {
+    ingField.hidden = !ifaceIngressSplitActive(cfg);
+  }
+}
+
+function currentIfaceCfgFromForm() {
+  return {
+    egress_dev: $("egressDev")?.value || "",
+    egress_ip: $("egressIp")?.value || "",
+    ingress_dev: $("ingressDev")?.value || "",
+    ingress_ip: $("ingressIp")?.value || "",
+  };
+}
+
 async function initNetworkForm(state) {
   const data = await fetchJson("/api/net/ifaces");
   if (!data) return;
@@ -1605,6 +2057,7 @@ async function initNetworkForm(state) {
     if ($("ifaceFwEnabled")) {
       $("ifaceFwEnabled").checked = fw.enabled !== false;
     }
+    updateIfaceFwReservedUI(fw, cfg);
     if (cfg.route_mode) {
       state.routeMode = cfg.route_mode;
       state.persistedRouteMode = cfg.route_mode;
@@ -1639,11 +2092,28 @@ function initIfaceFirewallSync(state) {
   const mark = () => {
     state.ifaceFwSyncDirty = true;
   };
+  const refreshReserved = () => {
+    updateIfaceFwReservedUI(
+      {
+        reserved_tcp_ports: ($("ifaceFwReservedPorts")?.textContent || "80, 443, 5000")
+          .split(",")
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((n) => Number.isFinite(n)),
+        reserved_apply_on: ifaceIngressSplitActive(currentIfaceCfgFromForm()) ? "ingress" : "egress",
+      },
+      currentIfaceCfgFromForm(),
+    );
+  };
   for (const id of ["ifaceFwEnabled", "ifaceFwEgressPorts", "ifaceFwIngressPorts"]) {
     const el = document.getElementById(id);
     if (!el) continue;
     el.addEventListener("change", mark);
     el.addEventListener("input", mark);
+  }
+  for (const id of ["egressDev", "egressIp", "ingressDev", "ingressIp"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener("change", refreshReserved);
   }
 }
 
@@ -1714,9 +2184,18 @@ function initInterfaceSave() {
       toast("Сохранено успешно. Маршрутизация применена.", "ok");
       if (res && res.warning) toast(String(res.warning), "warn", 5200);
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
+      if (res && res.config && res.config.firewall) {
+        const fw = res.config.firewall;
+        $("ifaceFwEgressPorts").value = Array.isArray(fw.egress_tcp_ports) ? fw.egress_tcp_ports.join(", ") : "";
+        $("ifaceFwIngressPorts").value = Array.isArray(fw.ingress_tcp_ports) ? fw.ingress_tcp_ports.join(", ") : "";
+        updateIfaceFwReservedUI(fw, res.config);
+      }
       if (window.__awgState) window.__awgState.ifaceFwSyncDirty = false;
       await refreshDnsPanel();
-      if (window.__awgState) await refreshMtprotoState(window.__awgState);
+      if (window.__awgState) {
+        await refreshMtprotoState(window.__awgState);
+        await refreshTunnelsState(window.__awgState);
+      }
     } catch (e) {
       setStatusById("egressStatus", "dot--bad", "ошибка применения");
       setStatusById("ingressStatus", "dot--bad", "ошибка применения");
@@ -1945,9 +2424,16 @@ function initRoutingPanel(state) {
 
   function refreshGeoUi() {
     const geoSelected = state.routeMode === "georouting";
-    geoFieldset.disabled = !geoSelected;
+    const geoPanelEnabled = geoSelected && state.tunnelUp;
+    geoFieldset.disabled = !geoPanelEnabled;
     if (!geoSelected) {
       setStatusById("geoRoutingStatus", "dot--unknown", "выберите режим georouting");
+    } else if (!state.tunnelUp) {
+      setStatusById(
+        "geoRoutingStatus",
+        "dot--bad",
+        "Нет рабочего туннельного интерфейса — настройка georouting недоступна"
+      );
     } else if (!state.geo.ipMode && !state.geo.domainMode) {
       setStatusById("geoRoutingStatus", "dot--warn", "Требуется включить хотя бы один режим");
     } else if (state.persistedRouteMode !== "georouting") {
@@ -1964,15 +2450,16 @@ function initRoutingPanel(state) {
     geoIpModeBtn.setAttribute("aria-pressed", state.geo.ipMode ? "true" : "false");
     geoDomainModeBtn.setAttribute("aria-pressed", state.geo.domainMode ? "true" : "false");
 
-    geoIpModeBtn.disabled = !geoSelected;
-    geoDomainModeBtn.disabled = !geoSelected;
-    geoLists.ipInclude.disabled = !(geoSelected && state.geo.ipMode);
-    geoLists.ipExclude.disabled = !(geoSelected && state.geo.ipMode);
-    geoLists.domainInclude.disabled = !(geoSelected && state.geo.domainMode);
-    geoLists.domainExclude.disabled = !(geoSelected && state.geo.domainMode);
-    geoReady.ipAdd.disabled = !(geoSelected && state.geo.ipMode);
-    geoReady.domainAdd.disabled = !(geoSelected && state.geo.domainMode);
-    geoApplyBtn.disabled = !geoSelected;
+    geoIpModeBtn.disabled = !geoPanelEnabled;
+    geoDomainModeBtn.disabled = !geoPanelEnabled;
+    geoTarget.disabled = !geoPanelEnabled;
+    geoLists.ipInclude.disabled = !(geoPanelEnabled && state.geo.ipMode);
+    geoLists.ipExclude.disabled = !(geoPanelEnabled && state.geo.ipMode);
+    geoLists.domainInclude.disabled = !(geoPanelEnabled && state.geo.domainMode);
+    geoLists.domainExclude.disabled = !(geoPanelEnabled && state.geo.domainMode);
+    geoReady.ipAdd.disabled = !(geoPanelEnabled && state.geo.ipMode);
+    geoReady.domainAdd.disabled = !(geoPanelEnabled && state.geo.domainMode);
+    geoApplyBtn.disabled = !geoPanelEnabled;
     refreshReadyStatus("ip");
     refreshReadyStatus("domain");
   }
@@ -2043,8 +2530,9 @@ function initRoutingPanel(state) {
   }
 
   const applyMode = async (mode, options = {}) => {
-    if (!state.tunnelUp) {
-      setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
+    if (!state.tunnelUp && mode !== "egress") {
+      setRoutingNoTunnelStatus();
+      toast("Туннель недоступен — доступен только режим Egress.", "warn", 3200);
       return;
     }
     if (mode === "georouting") {
@@ -2053,7 +2541,9 @@ function initRoutingPanel(state) {
         const active = btn.getAttribute("data-route-mode") === mode;
         btn.classList.toggle("is-active", active);
       }
-      if (state.persistedRouteMode === "georouting") {
+      if (!state.tunnelUp) {
+        syncRoutingModeStatusWhenTunnelDown(state);
+      } else if (state.persistedRouteMode === "georouting") {
         setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
       } else {
         setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
@@ -2081,6 +2571,7 @@ function initRoutingPanel(state) {
       await refreshDnsPanel();
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
       await refreshMtprotoState(state);
+      await refreshTunnelsState(state);
     } catch (e) {
       setRouteModeStatus(mode, false);
       if (!options.silent) toast(`Ошибка применения режима: ${e?.message || "unknown"}`, "error", 2800);
@@ -2122,19 +2613,30 @@ function initRoutingPanel(state) {
         const active = b.getAttribute("data-route-mode") === state.routeMode;
         b.classList.toggle("is-active", active);
       }
-      setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
       if (res && res.config && res.config.geo) {
         commitSavedGeoFingerprint(state, res.config.geo);
       } else {
         commitSavedGeoFingerprint(state, state.geo);
       }
       refreshInterfaceStatuses(res && res.runtime ? res.runtime : null);
+      if (res && res.config && res.config.firewall) {
+        const fw = res.config.firewall;
+        $("ifaceFwEgressPorts").value = Array.isArray(fw.egress_tcp_ports) ? fw.egress_tcp_ports.join(", ") : "";
+        $("ifaceFwIngressPorts").value = Array.isArray(fw.ingress_tcp_ports) ? fw.ingress_tcp_ports.join(", ") : "";
+        updateIfaceFwReservedUI(fw, res.config);
+      }
       toast("Georouting применен. Сервисы обновления списков перезапущены.", "ok", 2600);
       if (res && res.mtproto_sync_warning) toast(String(res.mtproto_sync_warning), "warn", 5200);
       refreshGeoUi();
       state.ifaceFwSyncDirty = false;
       await refreshDnsPanel();
       await refreshMtprotoState(state);
+      await refreshTunnelsState(state);
+      if (!state.tunnelUp) {
+        syncRoutingModeStatusWhenTunnelDown(state);
+      } else {
+        setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
+      }
       try {
         const d = await fetchJson("/api/dns/config");
         const wr = d && d.amnezia_dns_watch;
@@ -2158,12 +2660,12 @@ function initRoutingPanel(state) {
   }
 
   root.addEventListener("click", (ev) => {
-    if (!state.tunnelUp) return;
     const t = ev.target;
     if (!(t instanceof HTMLElement)) return;
     const btn = t.closest(".routing-mode-btn");
     if (!(btn instanceof HTMLElement)) return;
     const mode = btn.getAttribute("data-route-mode") || "egress";
+    if (!state.tunnelUp && mode !== "egress") return;
     applyMode(mode);
   });
 
@@ -2289,17 +2791,8 @@ function initRoutingPanel(state) {
     const active = btn.getAttribute("data-route-mode") === startMode;
     btn.classList.toggle("is-active", active);
   }
-  if (!state.tunnelUp) {
-    setStatusById("routingModeStatus", "dot--ok", "маршрутизируем в egress (по умолчанию)");
-  } else if (startMode === "georouting") {
-    if (state.persistedRouteMode === "georouting") {
-      setStatusById("routingModeStatus", "dot--ok", "georouting: применено");
-    } else {
-      setStatusById("routingModeStatus", "dot--warn", "georouting: пока не применено");
-    }
-  } else {
-    setRouteModeStatus(startMode, true);
-  }
+  setRoutingAvailability(state.tunnelUp, state);
+  state.refreshGeoUi = refreshGeoUi;
   refreshGeoUi();
 
   async function pollGeoReadyLinkStatuses() {
@@ -2380,7 +2873,7 @@ async function main() {
   }
 
   applyAppVersionLabels("");
-  initImportModal(state);
+  initDualTunnels(state);
   initAmneziaSetupBanner();
   initWebUiUpdateBanner();
   initMtprotoPanel(state);
@@ -2391,12 +2884,12 @@ async function main() {
 
   await initNetworkForm(state);
   initIfaceFirewallSync(state);
-  await refreshTunnelStatus(state);
+  await refreshTunnelsState(state);
   initRoutingPanel(state);
   await refreshSystemMetrics(state);
   await refreshMtprotoState(state);
   await refreshDnsPanel();
-  setInterval(() => refreshTunnelStatus(state), 5000);
+  setInterval(() => refreshTunnelsState(state), 5000);
   setInterval(() => refreshSystemMetrics(state), 2000);
   setInterval(() => refreshMtprotoState(state), 5000);
   setInterval(() => refreshDnsPanel(), 12000);

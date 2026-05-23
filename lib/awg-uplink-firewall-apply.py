@@ -10,6 +10,9 @@
 - **Без пакета ufw** — те же ограничения через nftables (`inet awg_webui_fw`); переключатель «выкл»
   только снимает эту таблицу.
 
+Порты 80, 443 и masking (AWG_UI_MASK_PORT, по умолчанию 5000) всегда открываются на ingress при split
+или на egress, если ingress совпадает с egress.
+
 Georouting / DNS-transport-lock — отдельные nft-таблицы.
 
 Порты: interfaces.json → firewall (fallback — dns.json).
@@ -27,11 +30,13 @@ from pathlib import Path
 
 CFG = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui"))
 ENV_FILE = CFG / "interfaces.env"
+WEBUI_ENV = CFG / "webui.env"
 IFACE_JSON = CFG / "interfaces.json"
 DNS_JSON = CFG / "dns.json"
 NFT_TABLE = "awg_webui_fw"
 AWG_IFACE = os.environ.get("AWG_FW_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
 UFW_MARKER = "awg-web-ui-fw"
+DEFAULT_MASK_PORT = 5000
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -54,9 +59,46 @@ def env_flag_true(key: str, env: dict, *, default: str = "1") -> bool:
     return raw not in ("0", "false", "no", "off", "")
 
 
+def load_mask_port() -> int:
+    raw = (os.environ.get("AWG_UI_MASK_PORT") or "").strip()
+    if not raw and WEBUI_ENV.exists():
+        for line in WEBUI_ENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("AWG_UI_MASK_PORT="):
+                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    if raw:
+        try:
+            n = int(raw)
+            if 1 <= n <= 65535:
+                return n
+        except ValueError:
+            pass
+    return DEFAULT_MASK_PORT
+
+
+def reserved_tcp_ports() -> list[int]:
+    return sorted({80, 443, load_mask_port()})
+
+
+def effective_fw_ports(
+    egress: str,
+    ing_en: bool,
+    ingress: str,
+    eg_ports: list[int],
+    ing_ports: list[int],
+) -> tuple[list[int], list[int]]:
+    """Порты для UFW/nft: reserved всегда на ingress (split) или на egress (egress=ingress)."""
+    reserved = set(reserved_tcp_ports())
+    distinct_ingress = bool(ing_en and ingress and ingress != egress)
+    if distinct_ingress:
+        return sorted(set(eg_ports)), sorted(set(ing_ports) | reserved)
+    return sorted(set(eg_ports) | set(ing_ports) | reserved), sorted(set(ing_ports))
+
+
 def load_fw_ports() -> tuple[list[int], list[int]]:
     eg = [22]
-    ing = [22, 443, 8080]
+    ing = [22, 80, 443, load_mask_port()]
     fw = None
     if IFACE_JSON.exists():
         try:
@@ -144,9 +186,20 @@ def ufw_add(rule_args: list[str]) -> bool:
     return True
 
 
-def ufw_managed_input_ifaces(egress: str, distinct_ingress: bool, ingress: str) -> set[str]:
+def load_tunnel_ifaces(env: dict[str, str]) -> list[str]:
+    names: list[str] = []
+    for key in ("TUNNEL_IFACE", "TUNNEL1_IFACE", "TUNNEL2_IFACE", "AWG_FW_AWG_IFACE"):
+        v = (os.environ.get(key) or env.get(key, "") or "").strip()
+        if v and v not in names:
+            names.append(v)
+    if AWG_IFACE not in names:
+        names.append(AWG_IFACE)
+    return names
+
+
+def ufw_managed_input_ifaces(egress: str, distinct_ingress: bool, ingress: str, tunnel_ifaces: list[str]) -> set[str]:
     """Интерфейсы, на которых входящий трафик режем (остальные считаем «локальными» для UFW)."""
-    s: set[str] = {AWG_IFACE}
+    s: set[str] = set(tunnel_ifaces)
     if egress:
         s.add(egress)
     if distinct_ingress and ingress:
@@ -191,17 +244,20 @@ def apply_nft(
     if not egress:
         return
 
+    eg_ports, ing_ports = effective_fw_ports(egress, ing_en, ingress, eg_ports, ing_ports)
+
     lines = [
         f"table inet {NFT_TABLE} {{",
         "  chain input {",
         "    type filter hook input priority 55; policy accept;",
         "    ct state established,related accept",
         "    iif lo accept",
-        f'    iifname "{nft_escape(AWG_IFACE)}" ct state new counter drop',
     ]
+    tunnel_ifaces = load_tunnel_ifaces(parse_env(ENV_FILE))
+    for tun in tunnel_ifaces:
+        lines.append(f'    iifname "{nft_escape(tun)}" ct state new counter drop')
 
     distinct_ingress = ing_en and ingress and ingress != egress
-    union_fw_ports = bool(egress and ingress and ingress == egress)
 
     if distinct_ingress:
         eg_ps = ", ".join(str(p) for p in eg_ports)
@@ -211,11 +267,7 @@ def apply_nft(
         lines.append(f'    iifname "{nft_escape(ingress)}" tcp dport {{ {ing_ps} }} ct state new counter accept')
         lines.append(f'    iifname "{nft_escape(ingress)}" ct state new counter drop')
     else:
-        if union_fw_ports:
-            ports = sorted(set(eg_ports) | set(ing_ports))
-        else:
-            ports = eg_ports
-        ps = ", ".join(str(p) for p in ports)
+        ps = ", ".join(str(p) for p in eg_ports)
         lines.append(f'    iifname "{nft_escape(egress)}" tcp dport {{ {ps} }} ct state new counter accept')
         lines.append(f'    iifname "{nft_escape(egress)}" ct state new counter drop')
 
@@ -244,8 +296,8 @@ def apply_ufw_panel(
     if not egress:
         return
 
+    eg_ports, ing_ports = effective_fw_ports(egress, ing_en, ingress, eg_ports, ing_ports)
     distinct_ingress = ing_en and ingress and ingress != egress
-    union_fw_ports = bool(egress and ingress and ingress == egress)
 
     def allow_tcp_on(dev: str, ports: list[int]) -> None:
         if not ports:
@@ -275,7 +327,8 @@ def apply_ufw_panel(
         """Полный входящий на «локальный» интерфейс (docker bridge, veth и т.д.)."""
         ufw_add(["allow", "in", "on", dev, "comment", UFW_MARKER])
 
-    managed = ufw_managed_input_ifaces(egress, distinct_ingress, ingress)
+    tunnel_ifaces = load_tunnel_ifaces(parse_env(ENV_FILE))
+    managed = ufw_managed_input_ifaces(egress, distinct_ingress, ingress, tunnel_ifaces)
     for loc in ufw_local_input_ifaces(managed):
         allow_all_in_on(loc)
 
@@ -285,14 +338,11 @@ def apply_ufw_panel(
         allow_tcp_on(ingress, ing_ports)
         deny_in_on(ingress)
     else:
-        if union_fw_ports:
-            ports = sorted(set(eg_ports) | set(ing_ports))
-        else:
-            ports = eg_ports
-        allow_tcp_on(egress, ports)
+        allow_tcp_on(egress, eg_ports)
         deny_in_on(egress)
 
-    deny_in_on(AWG_IFACE)
+    for tun in tunnel_ifaces:
+        deny_in_on(tun)
 
 
 def main() -> None:
@@ -312,6 +362,15 @@ def main() -> None:
 
     nft_delete_table()
     ufw_purge_marker()
+
+    if not egress:
+        sys.stderr.write(
+            "[awg-uplink-firewall] EGRESS_DEV не задан — UFW/nft не применяются "
+            "(сохраните настройки интерфейсов в панели).\n"
+        )
+        return
+
+    eg_ports, ing_ports = effective_fw_ports(egress, ing_en, ingress, eg_ports, ing_ports)
 
     if shutil.which("ufw"):
         if not ufw_force_enable():

@@ -34,7 +34,15 @@ MARK_LOCAL_DEC = "30631"
 RULE_PRIO = os.environ.get("AWG_GEO_DOMAIN_RULE_PRIO", "72").strip() or "72"
 NAT_POST_PRIO = os.environ.get("AWG_GEO_DOMAIN_NAT_POST_PRIO", "99").strip() or "99"
 LIST_TIMEOUT_SEC = int(os.environ.get("AWG_GEO_DOMAIN_FETCH_TIMEOUT_SEC", "40"))
-AWG_IFACE = os.environ.get("AWG_GEO_DOMAIN_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
+def resolve_tunnel_iface() -> str:
+    for key in ("TUNNEL_IFACE", "AWG_GEO_IP_AWG_IFACE", "AWG_GEO_DOMAIN_AWG_IFACE"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return "awg-uplink"
+
+
+AWG_IFACE = "awg-uplink"
 TABLE_GEO_TUN = os.environ.get("AWG_GEO_DOMAIN_TABLE_TUN", "207").strip() or "207"
 TABLE_GEO_EGRESS = os.environ.get("AWG_GEO_DOMAIN_TABLE_EGRESS", "208").strip() or "208"
 DNSMASQ_GEO_NFTSET = Path("/etc/dnsmasq.d/awg-uplink-geo-domain-nftset.conf")
@@ -566,6 +574,8 @@ def collect_domains(ready_domain: list, include_domains: list[str], exclude_set:
 
 
 def main():
+    global AWG_IFACE
+    AWG_IFACE = resolve_tunnel_iface()
     if not shutil.which("nft") or not shutil.which("ip"):
         raise SystemExit("ip/nft is required")
     iface_cfg = load_json(CIF_JSON)
@@ -620,6 +630,7 @@ def main():
         write_json(GEO_JSON, geo)
 
     persist_geo_domain_set_snapshots()
+    sync_geo_policy_table(table_id, iface_cfg)
 
 
 if __name__ == "__main__":

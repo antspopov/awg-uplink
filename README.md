@@ -29,7 +29,7 @@
 
 ## Требования
 
-- **ОС:** в первую очередь **Ubuntu / Debian** (скрипт ставит пакеты через `apt-get`, при необходимости — **AmneziaWG** из PPA или сборкой из исходников).
+- **ОС:** **Ubuntu 24.04 LTS** (целевая и проверенная платформа; скрипт ставит пакеты через `apt-get`, при необходимости — **AmneziaWG** из PPA или сборкой из исходников). Другие Ubuntu/Debian могут работать, но без гарантии.
 - **Права:** установка только **от root** (`sudo ./awg-webui-bootstrap.sh`).
 - **Сеть:** для профиля с **Let's Encrypt** домен должен указывать на сервер, порты **80/443** доступны извне; для **самоподписанного** сертификата браузер покажет предупреждение безопасности.
 - **Репозиторий:** клон с **GitHub** — см. следующий раздел.
@@ -79,7 +79,7 @@ sudo ./awg-webui-bootstrap.sh
 | Опция | Назначение |
 |--------|------------|
 | `--no-start` | установить файлы и конфиги, но не перезапускать веб-сервис в конце |
-| `--update-files-only` | только обновить файлы из репозитория и перезапустить `awg-uplink-webui`, без повторного мастера |
+| `--update-files-only` | обновить файлы, применить runtime (туннели, ifaces, firewall, таймеры) и перезапустить webui, без мастера |
 | `--uninstall` | полностью снять **текущую** установку `awg-webui-bootstrap.sh` (см. [ниже](#полная-деинсталляция-bootstrap)); не сочетать с другими опциями |
 
 Справка: `sudo ./awg-webui-bootstrap.sh --help`
@@ -120,7 +120,9 @@ sudo git pull
 sudo ./awg-webui-bootstrap.sh --update-files-only
 ```
 
-Так обновляются файлы приложения и перезапускается только **awg-uplink-webui**, без повторной настройки nginx/сертификатов через мастер.
+Так обновляются файлы приложения, применяется runtime (туннели, ifaces, firewall, таймеры) и перезапускается **awg-uplink-webui**, без повторной настройки nginx/сертификатов через мастер.
+
+**Обновление из панели:** сравнивается `VERSION` на GitHub; в окне показываются **все** секции **`CHANGELOG.md`** между текущей и новой версией (или коммиты с GitHub). Перед релизом поднимите `VERSION` и допишите `CHANGELOG.md`.
 
 ---
 
@@ -158,6 +160,7 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 | `/opt/awg-uplink/webui/` | Статика и `server.py` |
 | `/etc/awg-uplink-webui/webui.env` | Параметры сервера UI: хост, порт, `AWG_UI_USER` / `AWG_UI_PASS`, `AWG_WEBUI_BASE_PATH`, домен и режим TLS для MTProto/Web, `AWG_UI_MASK_PORT` и др. |
 | `/etc/awg-uplink-webui/interfaces.json` | Сохранённые egress/ingress, режим маршрутизации |
+| `/etc/awg-uplink-webui/tunnels.json` | Два туннеля (вкл/выкл), failover, список ping-целей |
 | `/etc/awg-uplink-webui/georouting.json` | Режимы georouting, списки, целевой интерфейс |
 | `/etc/awg-uplink-webui/dns.json` | DNS upstream, dnscrypt, брандмауэр по портам, опции AmneziaDNS |
 | `/var/lib/awg-uplink-webui/sessions.json` | Сохранённые сессии входа (чтобы после перезапуска UI не выкидывало из аккаунта до истечения срока) |
@@ -179,19 +182,23 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 
 - **Egress** — основной выход в интернет: интерфейс, IPv4-адрес, шлюз, разрешённые **входящие TCP** на этом интерфейсе (например SSH).
 - **Ingress** — отдельный вход, если есть второй публичный IP/интерфейс; иначе роль ingress может совпасть с egress (подсказки в форме).
-- **Файрвол панели** — переключатель «включить» (по умолчанию включён): при установленном **ufw** скрипт выполняет **`ufw --force enable`** и добавляет только правила с меткой **`awg-web-ui-fw`** (остальные правила UFW не меняет). Входящий трафик режется только на **egress**, **ingress** (если включён отдельным интерфейсом) и **awg-uplink**; на остальных интерфейсах хоста (docker/amn/veth и т.д.) добавляется **`allow in`** на весь входящий, чтобы при глобальном deny UFW не ломать DNS и локальные сервисы. При **выключенном** переключателе — снимаются помеченные правила, удаляется таблица **`inet awg_webui_fw`**, выполняется **`ufw --force disable`**. Если пакета **ufw** нет — те же ограничения через **nft** (`awg_webui_fw`). **Georouting и DNS-transport-lock** по-прежнему на nftables.
+- **Файрвол панели** — переключатель «включить» (по умолчанию включён): правила применяются **после первого сохранения** настроек интерфейсов (нужен `EGRESS_DEV`). При установленном **ufw** скрипт выполняет **`ufw --force enable`** и добавляет только правила с меткой **`awg-web-ui-fw`**. Порты **80**, **443** и masking Web UI (**5000** по умолчанию, `AWG_UI_MASK_PORT`) **всегда открыты** на **ingress** (если он отделён от egress) или на **egress**, если ingress совпадает с egress — их нельзя убрать в форме. Дополнительные TCP-порты (например SSH) задаются вручную. Входящий трафик режется на **egress**, **ingress** (если split) и **awg-uplink**; на docker/amn/veth — **`allow in`**, чтобы не ломать DNS. При выключенном переключателе — снятие помеченных правил, **`ufw --force disable`**. Без **ufw** — те же ограничения через **nft** (`awg_webui_fw`). **Georouting и DNS-transport-lock** — отдельные nft-таблицы.
 - Кнопка **«Сохранить»** — записывает конфигурацию и запускает применение маршрутизации на стороне сервера.
 - **Edit netplan** — просмотр/редактирование netplan (для опытных пользователей).
 
 Пока egress (и при необходимости логика гейта) не удовлетворяют проверке готовности, **остальная панель** остаётся недоступной — это сделано специально, чтобы не строить маршрутизацию и VPN «в пустоту».
 
-### Туннельный интерфейс (AmneziaWG / `awg-uplink`)
+### Туннельные интерфейсы (AmneziaWG)
 
-Доступен **после** сохранения настроек интерфейсов.
+Доступны **после** сохранения настроек интерфейсов.
 
-- **Импорт конфига** — выбор файла `.conf` / `.txt` или вставка текста в модальном окне, затем **«Импортировать»**.
-- **«Перезапустить awg-uplink»** — перезапуск systemd-юнита туннеля и повторное применение связанной маршрутизации.
-- Статус **UP/DOWN** отображается в шапке карточки; от него зависит доступность режимов **«маршрут в туннель»** и части проверок georouting.
+- **Два туннеля:** `awg-uplink` (туннель 1) и `awg-uplink-2` (туннель 2) — отдельные переключатели **вкл/выкл**, импорт конфига, перезапуск.
+- **Выключенный туннель не запускается** (`awg-quick@…` stop + disable).
+- **Один включённый** — весь трафик в режиме «в туннель» идёт через него.
+- **Проверка связи (ping)** — для **каждого включённого** туннеля сервис `awg-uplink-tunnel-failover` пингует адреса из списка (по умолчанию `1.1.1.1`, `8.8.8.8`) с интервалом из панели (по умолчанию 30 с), в том числе когда включён **только один** туннель. На панели: «связь OK (ping)» / «нет связи (ping)».
+- **Оба включены** — по умолчанию трафик через **туннель 1**; при сбое ping на первом и успехе на втором — переключение на туннель 2.
+- Конфигурация: `/etc/awg-uplink-webui/tunnels.json`, активный интерфейс — `TUNNEL_IFACE` в `interfaces.env`.
+- Статус **UP** активного туннеля нужен для режима **«маршрут в туннель»** и части проверок georouting.
 
 ### Роутинг
 
@@ -234,7 +241,7 @@ sudo ./scripts/remove-legacy-minimal-awg-uplink.sh
 
 ## English summary
 
-**AWG Split Gate** bundles routing, AmneziaWG tunneling (interface `awg-uplink`), optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). Full removal of this install: **`sudo ./awg-webui-bootstrap.sh --uninstall`** (destructive; see Russian section). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`), and detailed panel behavior.
+**AWG Split Gate** bundles routing, AmneziaWG tunneling (interface `awg-uplink`), optional georouting (IP/domain lists via nftables), DNS (dnsmasq + dnscrypt-proxy + AmneziaDNS hooks), firewall automation, and **MTProto** lifecycle into one **browser-based** control plane. Target OS: **Ubuntu 24.04 LTS**. Install from GitHub with **`sudo ./awg-webui-bootstrap.sh`** (HTTPS wizard, nginx, systemd). Full removal of this install: **`sudo ./awg-webui-bootstrap.sh --uninstall`** (destructive; see Russian section). The UI is served behind nginx; start configuration from **Interfaces**, then tunnel, routing, DNS, and MTProto. Session cookies can be persisted to disk so a **webui service restart** does not always log you out. See the Russian sections above for paths, flags (`--update-files-only`), and detailed panel behavior.
 
 ---
 

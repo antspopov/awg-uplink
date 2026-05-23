@@ -1,0 +1,14 @@
+[Unit]
+Description=AWG Uplink tunnel ping health check (and failover when two tunnels enabled)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
+ExecStart=/usr/local/sbin/awg-uplink-tunnel-manage.py watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

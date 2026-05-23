@@ -7,4 +7,5 @@ Wants=network-online.target
 Type=oneshot
 Environment=AWG_WEBUI_CFG_DIR=/etc/awg-uplink-webui
 Environment=AWG_WEBUI_IFACE_ENV=/etc/awg-uplink-webui/interfaces.env
+EnvironmentFile=-/etc/awg-uplink-webui/interfaces.env
 ExecStart=/usr/local/sbin/awg-uplink-geo-ip-refresh.py

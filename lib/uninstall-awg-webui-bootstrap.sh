@@ -85,6 +85,8 @@ disable_matching_units() {
 		fi
 	done < <(systemctl list-unit-files --no-legend 2>/dev/null || true)
 	systemctl disable --now "awg-quick@${CANON_STEM}.service" 2>/dev/null || true
+	systemctl disable --now "awg-quick@awg-uplink-2.service" 2>/dev/null || true
+	systemctl disable --now awg-uplink-tunnel-failover.service 2>/dev/null || true
 }
 
 remove_unit_files() {
@@ -104,6 +106,7 @@ remove_unit_files() {
 		/etc/systemd/system/awg-uplink-amnezia-dns-watch.service \
 		/etc/systemd/system/awg-uplink-dns-transport-lock.service \
 		/etc/systemd/system/awg-uplink-firewall.service \
+		/etc/systemd/system/awg-uplink-tunnel-failover.service \
 		/etc/systemd/system/mtproto-proxy.service \
 		/etc/systemd/system/nfqws-mtproto.service \
 		/etc/systemd/system/dnscrypt-proxy.service; do

@@ -115,7 +115,7 @@ detect_to_main_cidrs() {
     [[ -n "${cidr:-}" && -n "${dev:-}" ]] || continue
     [[ "$cidr" =~ ^[0-9.]+/[0-9]+$ ]] || continue
     is_private_ipv4_cidr "$cidr" || continue
-    [[ "$dev" == "lo" || "$dev" == "awg-uplink" || "$dev" == "$egress_dev" || "$dev" == "$ingress_dev" ]] && continue
+    [[ "$dev" == "lo" || "$dev" == "${TUNNEL_IFACE:-awg-uplink}" || "$dev" == "${TUNNEL1_IFACE:-awg-uplink}" || "$dev" == "${TUNNEL2_IFACE:-awg-uplink-2}" || "$dev" == "$egress_dev" || "$dev" == "$ingress_dev" ]] && continue
     # Universal criteria: Linux bridge devices (docker/br/custom), plus common docker-style names.
     if [[ -d "/sys/class/net/${dev}/bridge" || "$dev" =~ ^(docker0|br-.*|amn[0-9]+)$ ]]; then
       out=$(cidr_list_add "$out" "$cidr")
@@ -131,7 +131,7 @@ detect_docker_bridge_subnet_lines() {
     [[ -n "${cidr:-}" && -n "${dev:-}" ]] || continue
     [[ "$cidr" =~ ^[0-9.]+/[0-9]+$ ]] || continue
     is_private_ipv4_cidr "$cidr" || continue
-    [[ "$dev" == "lo" || "$dev" == "awg-uplink" || "$dev" == "$egress_dev" || "$dev" == "$ingress_dev" ]] && continue
+    [[ "$dev" == "lo" || "$dev" == "${TUNNEL_IFACE:-awg-uplink}" || "$dev" == "${TUNNEL1_IFACE:-awg-uplink}" || "$dev" == "${TUNNEL2_IFACE:-awg-uplink-2}" || "$dev" == "$egress_dev" || "$dev" == "$ingress_dev" ]] && continue
     if [[ -d "/sys/class/net/${dev}/bridge" || "$dev" =~ ^(docker0|br-.*|amn[0-9]+)$ ]]; then
       printf '%s\t%s\n' "$cidr" "$dev"
     fi
@@ -359,12 +359,12 @@ setup_mtproto_fwmark_policy() {
   ip rule del fwmark "$MTPROTO_FWMARK_DEC" table "$MTPROTO_ROUTE_TABLE" priority "$MTPROTO_FWMARK_PRIO" 2>/dev/null || true
   ip route del default table "$MTPROTO_ROUTE_TABLE" 2>/dev/null || true
 
-  if [[ "$mode" == "tunnel" ]] && ip link show dev awg-uplink 2>/dev/null | grep -q 'UP'; then
-    awg_src="$(first_ipv4_for_dev awg-uplink || true)"
+  if [[ "$mode" == "tunnel" ]] && ip link show dev "${TUNNEL_IFACE:-awg-uplink}" 2>/dev/null | grep -q 'UP'; then
+    awg_src="$(first_ipv4_for_dev "${TUNNEL_IFACE:-awg-uplink}" || true)"
     if [[ -n "$awg_src" ]]; then
-      ip -4 route replace default dev awg-uplink src "$awg_src" table "$MTPROTO_ROUTE_TABLE"
+      ip -4 route replace default dev "${TUNNEL_IFACE:-awg-uplink}" src "$awg_src" table "$MTPROTO_ROUTE_TABLE"
     else
-      ip -4 route replace default dev awg-uplink table "$MTPROTO_ROUTE_TABLE"
+      ip -4 route replace default dev "${TUNNEL_IFACE:-awg-uplink}" table "$MTPROTO_ROUTE_TABLE"
     fi
   else
     if [[ -n "${EGRESS_GW:-}" ]]; then
@@ -497,12 +497,18 @@ remove_rules() {
   fi
 }
 
+flush_all_tunnel_defaults() {
+  flush_default_via_dev "${TUNNEL_IFACE:-awg-uplink}"
+  flush_default_via_dev "${TUNNEL1_IFACE:-awg-uplink}"
+  flush_default_via_dev "${TUNNEL2_IFACE:-awg-uplink-2}"
+}
+
 restore_default() {
   [[ -f $STATE_FILE ]] || return 0
   # shellcheck disable=SC1090
   . "$STATE_FILE"
   [[ -n ${OLD_DEFAULT:-} ]] || return 0
-  flush_default_via_dev awg-uplink
+  flush_all_tunnel_defaults
   # shellcheck disable=SC2086
   ip -4 route replace $OLD_DEFAULT 2>/dev/null || true
 }
@@ -513,6 +519,9 @@ apply_cfg() {
   . "$CFG_ENV"
   [[ "${ENABLE:-0}" == "1" ]] || { log "disabled in config"; exit 0; }
   [[ -n "${EGRESS_DEV:-}" && -n "${EGRESS_IP:-}" ]] || { log "missing egress fields"; exit 1; }
+  TUNNEL_IFACE="${TUNNEL_IFACE:-awg-uplink}"
+  TUNNEL1_IFACE="${TUNNEL1_IFACE:-awg-uplink}"
+  TUNNEL2_IFACE="${TUNNEL2_IFACE:-awg-uplink-2}"
   ROUTE_MODE="${ROUTE_MODE:-egress}"
   EGRESS_TABLE=202
   EGRESS_RULE_PRIO=80
@@ -538,15 +547,15 @@ apply_cfg() {
 
   if [[ "$ROUTE_MODE" == "tunnel" ]]; then
     # Bootstrapping / fresh install: apply egress+ingress split even if tunnel is not ready yet.
-    if ! ip link show dev awg-uplink 2>/dev/null | grep -q ',UP,'; then
-      log "awg-uplink not present or not UP — applying egress split instead of tunnel"
+    if ! ip link show dev "$TUNNEL_IFACE" 2>/dev/null | grep -q ',UP,'; then
+      log "${TUNNEL_IFACE} not present or not UP — applying egress split instead of tunnel"
       ROUTE_MODE=egress
     fi
   fi
 
   if [[ "$ROUTE_MODE" == "tunnel" ]]; then
     local awg_src
-    awg_src="$(first_ipv4_for_dev awg-uplink || true)"
+    awg_src="$(first_ipv4_for_dev "$TUNNEL_IFACE" || true)"
     # Keep route to tunnel endpoint(s) over physical uplink.
     while read -r _ ep; do
       [[ -z "${ep:-}" || "$ep" == "(none)" ]] && continue
@@ -554,7 +563,7 @@ apply_cfg() {
       if [[ "$ep" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         TUN_ENDPOINTS="${TUN_ENDPOINTS} ${ep}"
       fi
-    done < <(awg show awg-uplink endpoints 2>/dev/null || true)
+    done < <(awg show "$TUNNEL_IFACE" endpoints 2>/dev/null || true)
     TUN_ENDPOINTS="$(echo "$TUN_ENDPOINTS" | xargs -n1 2>/dev/null | sort -u | xargs 2>/dev/null || true)"
     if [[ -n "$TUN_ENDPOINTS" ]]; then
       for ep in $TUN_ENDPOINTS; do
@@ -579,19 +588,19 @@ apply_cfg() {
     ip -4 rule add from "$EGRESS_IP/32" table "$EGRESS_TABLE" priority "$EGRESS_RULE_PRIO"
     BYPASS_SRCS="$EGRESS_IP"
 
-    # Default for whole system -> tunnel (after from-EGRESS rule is in place).
-    while ip -4 route del default dev awg-uplink 2>/dev/null; do true; done
+    # Default for whole system -> active tunnel (after from-EGRESS rule is in place).
+    flush_all_tunnel_defaults
     if [[ -n "$awg_src" ]]; then
-      ip -4 route replace default dev awg-uplink src "$awg_src"
+      ip -4 route replace default dev "$TUNNEL_IFACE" src "$awg_src"
     else
-      ip -4 route replace default dev awg-uplink
+      ip -4 route replace default dev "$TUNNEL_IFACE"
     fi
 
     # Keep non-selected inbound interfaces routed to tunnel table explicitly.
     if [[ -n "$awg_src" ]]; then
-      ip -4 route replace default dev awg-uplink src "$awg_src" table "$TUN_TABLE"
+      ip -4 route replace default dev "$TUNNEL_IFACE" src "$awg_src" table "$TUN_TABLE"
     else
-      ip -4 route replace default dev awg-uplink table "$TUN_TABLE"
+      ip -4 route replace default dev "$TUNNEL_IFACE" table "$TUN_TABLE"
     fi
     [[ -n $elink ]] && ip -4 route replace "$elink" dev "$EGRESS_DEV" table "$TUN_TABLE"
     # Docker / bridge: nft mark + fwmark правило ПЕРЕД from <CIDR> (иначе mark не влияет).
@@ -633,7 +642,7 @@ apply_cfg() {
     ip -4 rule add table "$TUN_TABLE" priority "$TUN_RULE_PRIO"
   else
     # Egress mode: whole system default -> egress.
-    flush_default_via_dev awg-uplink
+    flush_all_tunnel_defaults
     if [[ -n "${EGRESS_GW:-}" ]]; then
       ip -4 route replace default via "$EGRESS_GW" dev "$EGRESS_DEV" src "$EGRESS_IP" metric "${EGRESS_METRIC:-100}"
     else

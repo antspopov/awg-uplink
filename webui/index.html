@@ -171,14 +171,19 @@
                   </label>
                 </div>
               </div>
+              <p class="iface-fw-reserved-note" id="ifaceFwReservedNote"></p>
+              <p class="iface-fw-reserved-ports">
+                Всегда открыты (нельзя удалить):
+                <span class="iface-fw-reserved-list" id="ifaceFwReservedPorts"></span>
+              </p>
               <div class="row">
                 <div class="field">
-                  <label for="ifaceFwEgressPorts">Открытые порты TCP на egress</label>
+                  <label for="ifaceFwEgressPorts">Дополнительные порты TCP на egress</label>
                   <input id="ifaceFwEgressPorts" type="text" placeholder="22" />
                 </div>
-                <div class="field">
-                  <label for="ifaceFwIngressPorts">Открытые порты TCP на ingress</label>
-                  <input id="ifaceFwIngressPorts" type="text" placeholder="22, 443, 8080" />
+                <div class="field" id="ifaceFwIngressField">
+                  <label for="ifaceFwIngressPorts">Дополнительные порты TCP на ingress</label>
+                  <input id="ifaceFwIngressPorts" type="text" placeholder="22" />
                 </div>
               </div>
             </div>
@@ -195,29 +200,79 @@
           <div id="ifaceConfigGate" class="iface-config-gate">
             <div class="card interface-tunnel-card">
               <div class="card-head">
-                <div class="card-title">Туннельный интерфейс</div>
-                <div class="status" id="tunnelStatus">
+                <div class="card-title">Туннельные интерфейсы</div>
+                <div class="status" id="tunnelFailoverStatus">
                   <span class="dot dot--unknown"></span>
-                  <span class="status-text">Туннель awg-uplink: неизвестно</span>
+                  <span class="status-text" id="tunnelFailoverStatusText">failover: —</span>
+                </div>
+              </div>
+              <p class="help tunnel-failover-hint" id="tunnelFailoverHint">
+                При включённых обоих туннелях трафик идёт через первый; при сбое первого — через второй (если второй доступен).
+                Проверка — ping по списку ниже.
+              </p>
+
+              <div class="tunnel-dual-grid">
+                <div class="tunnel-panel" data-tunnel-id="tunnel1">
+                  <div class="tunnel-panel-head">
+                    <div class="tunnel-panel-title">Туннель 1 <span class="tunnel-ifname">(awg-uplink)</span></div>
+                    <label class="toggle-switch iface-fw-toggle" title="Включить туннель 1">
+                      <input type="checkbox" id="tunnel1Enabled" role="switch" checked />
+                      <span class="toggle-switch-slider" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <div class="status tunnel-status-line" id="tunnel1Status">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">неизвестно</span>
+                  </div>
+                  <div class="tunnel-panel-actions">
+                    <input class="file-input-hidden tunnel-file-input" type="file" accept=".conf,.txt" data-tunnel-id="tunnel1" />
+                    <button class="btn tunnel-choose-file" type="button" data-tunnel-id="tunnel1">Файл…</button>
+                    <button class="btn tunnel-open-text" type="button" data-tunnel-id="tunnel1">Текст…</button>
+                    <button class="btn tunnel-import-btn" type="button" data-tunnel-id="tunnel1" disabled>Импорт</button>
+                    <button class="btn tunnel-restart-btn" type="button" data-tunnel-id="tunnel1" disabled title="Сначала импортируйте конфиг (.conf)">Перезапуск</button>
+                    <button class="btn btn--danger tunnel-delete-btn" type="button" data-tunnel-id="tunnel1" disabled title="Удалить файл конфигурации и остановить туннель">Удалить конфиг</button>
+                  </div>
+                  <div class="help tunnel-ping-line" data-tunnel-id="tunnel1"></div>
+                  <div class="help tunnel-help" data-tunnel-id="tunnel1">Конфиг не задан.</div>
+                </div>
+
+                <div class="tunnel-panel" data-tunnel-id="tunnel2">
+                  <div class="tunnel-panel-head">
+                    <div class="tunnel-panel-title">Туннель 2 <span class="tunnel-ifname">(awg-uplink-2)</span></div>
+                    <label class="toggle-switch iface-fw-toggle" title="Включить туннель 2">
+                      <input type="checkbox" id="tunnel2Enabled" role="switch" />
+                      <span class="toggle-switch-slider" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <div class="status tunnel-status-line" id="tunnel2Status">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">неизвестно</span>
+                  </div>
+                  <div class="tunnel-panel-actions">
+                    <input class="file-input-hidden tunnel-file-input" type="file" accept=".conf,.txt" data-tunnel-id="tunnel2" />
+                    <button class="btn tunnel-choose-file" type="button" data-tunnel-id="tunnel2">Файл…</button>
+                    <button class="btn tunnel-open-text" type="button" data-tunnel-id="tunnel2">Текст…</button>
+                    <button class="btn tunnel-import-btn" type="button" data-tunnel-id="tunnel2" disabled>Импорт</button>
+                    <button class="btn tunnel-restart-btn" type="button" data-tunnel-id="tunnel2" disabled title="Сначала импортируйте конфиг (.conf)">Перезапуск</button>
+                    <button class="btn btn--danger tunnel-delete-btn" type="button" data-tunnel-id="tunnel2" disabled title="Удалить файл конфигурации и остановить туннель">Удалить конфиг</button>
+                  </div>
+                  <div class="help tunnel-ping-line" data-tunnel-id="tunnel2"></div>
+                  <div class="help tunnel-help" data-tunnel-id="tunnel2">Конфиг не задан.</div>
                 </div>
               </div>
 
-              <div class="row">
+              <div class="row tunnel-health-row">
                 <div class="field">
-                  <label>Импортировать конфиг</label>
-                  <div class="file">
-                    <input id="confFileInput" class="file-input-hidden" type="file" accept=".conf,.txt" />
-                    <div class="file-left">
-                      <button class="btn" id="chooseFileBtn" type="button">Выбрать файл…</button>
-                      <button class="btn" id="openImportModalBtn" type="button">Вставить конфиг текстом…</button>
-                      <button class="btn" id="importApplyBtn" type="button" disabled>Импортировать</button>
-                    </div>
-                    <div class="file-right">
-                      <button class="btn" id="restartTunnelBtn" type="button">Перезапустить awg-uplink</button>
-                    </div>
-                  </div>
-                  <div class="help" id="confHelp">Конфиг не задан.</div>
+                  <label for="tunnelHealthTargets">Адреса для проверки (ping, через каждый включённый туннель)</label>
+                  <input id="tunnelHealthTargets" type="text" placeholder="1.1.1.1, 8.8.8.8" />
                 </div>
+                <div class="field tunnel-health-interval">
+                  <label for="tunnelHealthInterval">Интервал, сек</label>
+                  <input id="tunnelHealthInterval" type="number" min="5" step="1" value="30" placeholder="30" />
+                </div>
+              </div>
+              <div class="actions interface-actions-inline">
+                <button class="btn btn--primary" type="button" id="tunnelSettingsSaveBtn">Сохранить проверку связи</button>
               </div>
             </div>
             <div class="panel-sep"></div>
@@ -570,6 +625,10 @@
                     <option value="egress">Egress</option>
                     <option value="tunnel">Тунельный интерфейс</option>
                   </select>
+                  <div class="status mtp-outbound-status" id="mtpOutboundStatus">
+                    <span class="dot dot--unknown"></span>
+                    <span class="status-text">—</span>
+                  </div>
                 </div>
               </div>
               <div class="users-meta" id="mtpOutboundMeta"></div>
@@ -639,7 +698,8 @@
         <div class="modal-body modal-body--prose">
           <p>
             С сервера будет загружен код ветки <code id="webuiUpdateBranchLabel">main</code> репозитория
-            <code id="webuiUpdateRepoLabel">—</code>, будут обновлены файлы и зависимости apt. Файл
+            <code id="webuiUpdateRepoLabel">—</code>, будут обновлены файлы и зависимости apt, затем применены туннели,
+            маршрутизация (ifaces), firewall и таймеры geo/DNS. Файл
             <code>/etc/awg-uplink-webui/webui.env</code> (логин и пароль) и настройки nginx / сертификаты не перезаписываются.
           </p>
           <p class="modal-body__label">Версии</p>
@@ -647,6 +707,8 @@
             <li>Текущая: <strong id="webuiUpdateCurrentVer">—</strong></li>
             <li>На GitHub: <strong id="webuiUpdateLatestVer">—</strong></li>
           </ul>
+          <p class="modal-body__label" id="webuiUpdateChangesLabel" hidden>Изменения</p>
+          <div id="webuiUpdateChanges" class="webui-update-changes hidden" role="region" aria-live="polite"></div>
           <p class="muted" id="webuiUpdateBlockedHint" hidden></p>
         </div>
         <div class="modal-actions">
