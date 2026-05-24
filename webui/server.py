@@ -635,6 +635,23 @@ def _mtproto_public_ip_from_iface(iface: dict) -> str:
     return ingress_ip
 
 
+def _read_webui_env_value(key: str, default: str = "") -> str:
+    env_path = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui")) / "webui.env"
+    if not env_path.is_file():
+        return (os.environ.get(key) or default).strip()
+    prefix = f"{key}="
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith(prefix):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return (os.environ.get(key) or default).strip()
+
+
+def _webui_tls_self_signed() -> bool:
+    mode = _read_webui_env_value("AWG_UI_TLS_MODE", "self-signed").strip().lower()
+    return mode not in ("letsencrypt", "le")
+
+
 def _ipv4_literal_ok(s: str) -> bool:
     try:
         ipaddress.IPv4Address(str(s).strip())
@@ -1188,6 +1205,60 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         except OSError:
             pass
 
+    def _ntfy_public_host(self) -> str:
+        domain = _read_webui_env_value("AWG_UI_DOMAIN", "")
+        if _webui_tls_self_signed():
+            iface = self._load_iface_config()
+            if not isinstance(iface, dict):
+                iface = {}
+            ip = _mtproto_public_ip_from_iface(iface)
+            if _ipv4_literal_ok(ip):
+                return ip
+        return domain
+
+    def _ntfy_public_server_url(self) -> str:
+        host = str(self._ntfy_public_host() or "").strip()
+        if not host:
+            return ""
+        return f"https://{host}:{self._ntfy_port()}"
+
+    def _patch_ntfy_server_yml_base_url(self, server_url: str) -> None:
+        server_url = str(server_url or "").strip().rstrip("/")
+        if not server_url:
+            return
+        path = Path("/etc/ntfy/server.yml")
+        if not path.is_file():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+            new_text, n = re.subn(
+                r'^base-url:\s*".*"$',
+                f'base-url: "{server_url}"',
+                text,
+                count=1,
+                flags=re.M,
+            )
+            if n and new_text != text:
+                path.write_text(new_text, encoding="utf-8")
+                for unit in ("ntfy.service", "ntfy"):
+                    rc, _, _ = _run(["systemctl", "restart", unit], timeout=15.0)
+                    if rc == 0:
+                        break
+        except OSError:
+            pass
+
+    def _ensure_ntfy_public_url_synced(self) -> str:
+        url = self._ntfy_public_server_url()
+        if not url:
+            return ""
+        cfg = self._load_notifications_config()
+        cur = str(cfg.get("server_url") or "").strip().rstrip("/")
+        if cur != url:
+            cfg["server_url"] = url
+            self._store_notifications_config(cfg)
+            self._patch_ntfy_server_yml_base_url(url)
+        return url
+
     def _ntfy_subscribe_deeplink(self, server_url: str, topic: str) -> str:
         server_url = str(server_url or "").strip().rstrip("/")
         topic = str(topic or "").strip().strip("/")
@@ -1207,7 +1278,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 
     def _notifications_public_payload(self) -> dict:
         cfg = self._load_notifications_config()
-        server_url = str(cfg.get("server_url") or "").strip().rstrip("/")
+        server_url = self._ensure_ntfy_public_url_synced()
         topic = str(cfg.get("topic") or "").strip().strip("/")
         ntfy_active = self._service_is_active("ntfy.service") or self._service_is_active("ntfy")
         return {
@@ -3037,6 +3108,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         mt_extra = self._maybe_sync_mtproto_after_iface_change()
         if mt_extra:
             resp["mtproto_sync_warning"] = mt_extra
+        try:
+            self._ensure_ntfy_public_url_synced()
+        except Exception:
+            pass
         return resp
 
     def _op_net_routing_mode(self, body: dict) -> dict:
@@ -3064,6 +3139,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if not runtime.get("applied"):
             raise RuntimeError("routing not applied")
         mt_extra = self._maybe_sync_mtproto_after_iface_change()
+        try:
+            self._ensure_ntfy_public_url_synced()
+        except Exception:
+            pass
         out = {"ok": True, "config": cfg, "runtime": runtime}
         if mt_extra:
             out["mtproto_sync_warning"] = mt_extra

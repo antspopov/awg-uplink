@@ -26,6 +26,7 @@ read_env_from_webui() {
   AWG_UI_DOMAIN="${AWG_UI_DOMAIN:-}"
   AWG_UI_MASK_PORT="${AWG_UI_MASK_PORT:-5000}"
   AWG_UI_NTFY_PORT="${AWG_UI_NTFY_PORT:-5001}"
+  AWG_UI_TLS_MODE="${AWG_UI_TLS_MODE:-self-signed}"
   [[ -f "$f" ]] || return 0
   if [[ -z "$AWG_UI_DOMAIN" ]]; then
     AWG_UI_DOMAIN=$(grep -E '^[[:space:]]*AWG_UI_DOMAIN=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\"" | tr -d '[:space:]')
@@ -36,15 +37,62 @@ read_env_from_webui() {
   if grep -qE '^[[:space:]]*AWG_UI_NTFY_PORT=' "$f" 2>/dev/null; then
     AWG_UI_NTFY_PORT=$(grep -E '^[[:space:]]*AWG_UI_NTFY_PORT=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\"" | tr -d '[:space:]')
   fi
+  if grep -qE '^[[:space:]]*AWG_UI_TLS_MODE=' "$f" 2>/dev/null; then
+    AWG_UI_TLS_MODE=$(grep -E '^[[:space:]]*AWG_UI_TLS_MODE=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\"" | tr -d '[:space:]')
+  fi
   AWG_UI_MASK_PORT="${AWG_UI_MASK_PORT:-5000}"
   AWG_UI_NTFY_PORT="${AWG_UI_NTFY_PORT:-5001}"
+  AWG_UI_TLS_MODE="${AWG_UI_TLS_MODE:-self-signed}"
+}
+
+resolve_ntfy_public_host() {
+  local domain="$1"
+  domain=${domain// /}
+  [[ -n "$domain" ]] || return 1
+  local tls_mode="${AWG_UI_TLS_MODE:-self-signed}"
+  tls_mode=$(printf '%s' "$tls_mode" | tr '[:upper:]' '[:lower:]')
+  if [[ "$tls_mode" == "letsencrypt" ]]; then
+    echo "$domain"
+    return 0
+  fi
+  local ip
+  ip=$(python3 - <<'PY' "$CFG_DIR/interfaces.json"
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+iface = {}
+if p.exists():
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            iface = raw
+    except Exception:
+        pass
+egress_ip = str(iface.get("egress_ip") or "").strip()
+ingress_ip = str(iface.get("ingress_ip") or "").strip()
+egress_dev = str(iface.get("egress_dev") or "").strip()
+ingress_dev = str(iface.get("ingress_dev") or "").strip()
+split = bool(
+    ingress_ip and ingress_dev and (ingress_ip != egress_ip or ingress_dev != egress_dev)
+)
+print(ingress_ip if split else egress_ip)
+PY
+) || true
+  ip=${ip// /}
+  if [[ -n "$ip" ]]; then
+    echo "$ip"
+    return 0
+  fi
+  echo "$domain"
 }
 
 public_server_url() {
   local domain="$1"
   local _webui_port="$2"
   local ntfy_port="${AWG_UI_NTFY_PORT:-5001}"
-  echo "https://${domain}:${ntfy_port}"
+  local host
+  host=$(resolve_ntfy_public_host "$domain") || host="$domain"
+  echo "https://${host}:${ntfy_port}"
 }
 
 ensure_ntfy_package() {
