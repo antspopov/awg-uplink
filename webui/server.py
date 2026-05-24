@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -124,6 +125,38 @@ def _semver_tuple(s: str) -> tuple[int, int, int]:
 
 def _semver_gt(a: str, b: str) -> bool:
     return _semver_tuple(a) > _semver_tuple(b)
+
+
+def _fetch_remote_version(repo: str, branch: str) -> str:
+    """VERSION с GitHub: raw + Contents API (API не зависит от CDN-кэша raw.githubusercontent.com)."""
+    found: list[str] = []
+    br_q = urllib.parse.quote(branch, safe="")
+    try:
+        v = _http_get_text(f"https://raw.githubusercontent.com/{repo}/{branch}/VERSION", timeout=10.0)
+        v = v.splitlines()[0].strip() if v else ""
+        if v:
+            found.append(v)
+    except Exception:
+        pass
+    try:
+        data = _http_get_json(
+            f"https://api.github.com/repos/{repo}/contents/VERSION?ref={br_q}",
+            timeout=12.0,
+        )
+        if isinstance(data, dict) and str(data.get("encoding") or "") == "base64":
+            raw = base64.b64decode(str(data.get("content") or ""))
+            v = raw.decode("utf-8", errors="replace").splitlines()[0].strip()
+            if v:
+                found.append(v)
+    except Exception:
+        pass
+    if not found:
+        return ""
+    best = found[0]
+    for v in found[1:]:
+        if _semver_gt(v, best):
+            best = v
+    return best
 
 
 def _http_get_text(url: str, timeout: float = 8.0) -> str:
@@ -2643,9 +2676,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             out["update_apply_blocked_reason"] = "Сервис не запущен от root — обновление из панели недоступно."
         elif not Path("/usr/local/sbin/awg-webui-self-update.sh").is_file():
             out["update_apply_blocked_reason"] = "Не установлен awg-webui-self-update.sh (нужен bootstrap)."
-        url = f"https://raw.githubusercontent.com/{repo}/{branch}/VERSION"
         try:
-            remote = _http_get_text(url, timeout=10.0).splitlines()[0].strip()
+            remote = _fetch_remote_version(repo, branch)
             out["update_latest_version"] = remote
             cur = out["update_current_version"]
             if remote and _semver_gt(remote, cur):
