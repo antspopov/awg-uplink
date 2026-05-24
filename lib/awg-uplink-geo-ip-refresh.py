@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -12,10 +13,40 @@ from typing import Optional
 
 
 CFG_DIR = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui"))
+NOTIFY_SCRIPT = Path("/usr/local/sbin/awg-ntfy-notify.py")
 CIF_JSON = CFG_DIR / "interfaces.json"
 GEO_JSON = CFG_DIR / "georouting.json"
 CACHE_DIR = Path("/var/lib/awg-uplink/geo-ip")
 NFT_TABLE = "awg_geo_ip"
+
+
+def _notify_list_update_error(list_kind: str, url: str, detail: str, prev_status: str) -> None:
+    if prev_status == "с ошибкой" or not NOTIFY_SCRIPT.is_file():
+        return
+    payload = json.dumps(
+        {"list_kind": list_kind, "url": url, "detail": detail[:500]},
+        ensure_ascii=False,
+    )
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(NOTIFY_SCRIPT),
+                "event",
+                "--kind",
+                "list_update_error",
+                "--json",
+                payload,
+            ],
+            env={**os.environ, "AWG_WEBUI_CFG_DIR": str(CFG_DIR)},
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 NFT_NAT_TABLE = "awg_geo_snat"
 NFT_SET = "geo_ip_targets"
 NFT_EXCLUDE_SET = "geo_ip_exclude"
@@ -473,9 +504,11 @@ def main():
             fetch_to_cache(url, cfile)
             entry["status"] = "OK"
             changed = True
-        except Exception:
+        except Exception as ex:
+            prev_status = str(entry.get("status") or "")
             entry["status"] = "с ошибкой"
             changed = True
+            _notify_list_update_error("ip", url, str(ex), prev_status)
 
     all_cidrs = []
     seen = set()

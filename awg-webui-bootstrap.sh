@@ -129,6 +129,7 @@ SELF_SIGNED_CERT_DIR="/etc/ssl/awg-uplink-webui"
 NGINX_SITE_PATH="/etc/nginx/sites-available/awg-uplink-webui.conf"
 NGINX_SITE_LINK="/etc/nginx/sites-enabled/awg-uplink-webui.conf"
 WEBUI_MASK_PORT="${AWG_UI_MASK_PORT:-5000}"
+WEBUI_NTFY_PORT="${AWG_UI_NTFY_PORT:-5001}"
 EXISTING_LE_DOMAIN=""
 LE_RENEW_SELECTED=1
 
@@ -267,6 +268,11 @@ write_nginx_config() {
   local key_path=$2
   install -d -m 755 /var/www/certbot
   cat >"$NGINX_SITE_PATH" <<EOF
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -304,6 +310,35 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+    }
+}
+
+server {
+    listen ${WEBUI_NTFY_PORT} ssl;
+    listen [::]:${WEBUI_NTFY_PORT} ssl;
+    server_name $WEBUI_DOMAIN;
+
+    ssl_certificate $cert_path;
+    ssl_certificate_key $key_path;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    location / {
+        proxy_pass http://127.0.0.1:8093/;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_redirect off;
+        proxy_set_header Host \$http_host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 3m;
+        proxy_send_timeout 3m;
+        proxy_read_timeout 3m;
+        client_max_body_size 0;
     }
 }
 EOF
@@ -388,6 +423,34 @@ print_final_summary() {
   fi
   echo "${C_YELLOW}${C_BOLD}Login:${C_RESET} ${C_CYAN}${C_BOLD}$WEBUI_USER${C_RESET}"
   echo "${C_YELLOW}${C_BOLD}Password:${C_RESET} ${C_GREEN}${C_BOLD}$WEBUI_PASS${C_RESET}"
+  if [[ -f "$CFG_DIR/notifications.json" ]]; then
+    local ntfy_url ntfy_topic
+    ntfy_url=$(python3 - <<'PY' "$CFG_DIR/notifications.json"
+import json, sys
+from pathlib import Path
+try:
+    d = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    print(str(d.get("server_url") or "").strip())
+except Exception:
+    print("")
+PY
+)
+    ntfy_topic=$(python3 - <<'PY' "$CFG_DIR/notifications.json"
+import json, sys
+from pathlib import Path
+try:
+    d = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    print(str(d.get("topic") or "").strip())
+except Exception:
+    print("")
+PY
+)
+    if [[ -n "$ntfy_url" && -n "$ntfy_topic" ]]; then
+      echo
+      echo "${C_YELLOW}${C_BOLD}Push (ntfy):${C_RESET} ${C_GREEN}${ntfy_url}/${ntfy_topic}${C_RESET}"
+      echo "${C_YELLOW}Подпишитесь в приложении ntfy (Android/iOS) на этот URL или topic.${C_RESET}"
+    fi
+  fi
   echo
   echo "${C_YELLOW}Interface URLs:${C_RESET}"
   while IFS= read -r iface_url; do
@@ -621,6 +684,8 @@ fi
 [[ -f "$LIB_SRC/awg-uplink-dns-transport-lock.py" ]] || die "missing dns transport lock script in lib/"
 [[ -f "$LIB_SRC/awg-uplink-firewall-apply.py" ]] || die "missing firewall apply script in lib/"
 [[ -f "$LIB_SRC/awg-mtproto-install.sh" ]] || die "missing mtproto install script in lib/"
+[[ -f "$LIB_SRC/awg-ntfy-install.sh" ]] || die "missing ntfy install script in lib/"
+[[ -f "$LIB_SRC/awg-ntfy-notify.py" ]] || die "missing ntfy notify script in lib/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" ]] || die "missing dns refresh unit in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" ]] || die "missing dns refresh timer in systemd/"
 [[ -f "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" ]] || die "missing amnezia dns watch unit in systemd/"
@@ -636,7 +701,7 @@ fi
 if [[ $UPDATE_FILES_ONLY -eq 0 || $INSTALL_DEPS_ON_UPDATE -eq 1 ]] && command -v apt-get >/dev/null 2>&1; then
   log "Installing dependencies (python3, iproute2, netplan.io, nftables, ufw, dnsmasq, dnscrypt-proxy, curl, minisign, openssl, nginx, certbot, build-essential)..."
   DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables ufw dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 iproute2 netplan.io nftables ufw dnsmasq dnscrypt-proxy curl minisign openssl nginx certbot python3-certbot-nginx build-essential gcc g++ make libc6-dev gpg >/dev/null
   dnsmasq_quarantine_bind_interfaces_snippets
 fi
 
@@ -675,6 +740,8 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" "$APP_ROOT/lib/awg-up
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" "$APP_ROOT/lib/awg-uplink-firewall-apply.py"
 [[ -f "$LIB_SRC/awg-uplink-tunnel-manage.py" ]] && install -m 755 "$LIB_SRC/awg-uplink-tunnel-manage.py" "$APP_ROOT/lib/awg-uplink-tunnel-manage.py"
 install -m 755 "$LIB_SRC/awg-mtproto-install.sh" "$APP_ROOT/lib/awg-mtproto-install.sh"
+install -m 755 "$LIB_SRC/awg-ntfy-install.sh" "$APP_ROOT/lib/awg-ntfy-install.sh"
+install -m 755 "$LIB_SRC/awg-ntfy-notify.py" "$APP_ROOT/lib/awg-ntfy-notify.py"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.service" "$APP_ROOT/systemd/awg-uplink-dns-refresh.service"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-dns-refresh.timer" "$APP_ROOT/systemd/awg-uplink-dns-refresh.timer"
 install -m 644 "$SYSTEMD_SRC/awg-uplink-amnezia-dns-watch.service" "$APP_ROOT/systemd/awg-uplink-amnezia-dns-watch.service"
@@ -693,6 +760,8 @@ install -m 755 "$LIB_SRC/awg-uplink-dns-transport-lock.py" /usr/local/sbin/awg-u
 install -m 755 "$LIB_SRC/awg-uplink-firewall-apply.py" /usr/local/sbin/awg-uplink-firewall-apply.py
 [[ -f "$LIB_SRC/awg-uplink-tunnel-manage.py" ]] && install -m 755 "$LIB_SRC/awg-uplink-tunnel-manage.py" /usr/local/sbin/awg-uplink-tunnel-manage.py
 install -m 755 "$LIB_SRC/awg-mtproto-install.sh" /usr/local/sbin/awg-mtproto-install.sh
+install -m 755 "$LIB_SRC/awg-ntfy-install.sh" /usr/local/sbin/awg-ntfy-install.sh
+install -m 755 "$LIB_SRC/awg-ntfy-notify.py" /usr/local/sbin/awg-ntfy-notify.py
 install -m 755 "$LIB_SRC/awg-webui-self-update.sh" /usr/local/sbin/awg-webui-self-update.sh
 
 log "Installing systemd units..."
@@ -715,6 +784,10 @@ install -m 644 "$SYSTEMD_SRC/dnscrypt-proxy.service" "/etc/systemd/system/dnscry
 if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
   log "Update-only mode: skip configuration changes and prompts."
   migrate_legacy_tunnels_json
+  if [[ -x /usr/local/sbin/awg-ntfy-install.sh && -f "$CFG_DIR/webui.env" ]]; then
+    log "Ensuring ntfy (update-only)..."
+    AWG_WEBUI_CFG_DIR="$CFG_DIR" AWG_NTFY_UPDATE_ONLY=1 bash /usr/local/sbin/awg-ntfy-install.sh || log "warning: awg-ntfy-install failed"
+  fi
   post_update_refresh_services
   if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
     # Self-update: post-update уже выполнен; откладываем только restart webui (ответ API успеет уйти).
@@ -796,7 +869,7 @@ if [[ ! -f "$CFG_DIR/dns.json" ]]; then
   "firewall": {
     "enabled": true,
     "egress_tcp_ports": [22],
-    "ingress_tcp_ports": [22, 80, 443, 5000]
+    "ingress_tcp_ports": [22, 80, 443, 5000, 5001]
   },
   "amnezia_dns_watch_enabled": true,
   "amnezia_dns_container": "amnezia-dns",
@@ -883,6 +956,7 @@ set_env_key "$CFG_DIR/webui.env" "AWG_UI_PASS" "$WEBUI_PASS"
 set_env_key "$CFG_DIR/webui.env" "AWG_UI_DOMAIN" "$WEBUI_DOMAIN"
 set_env_key "$CFG_DIR/webui.env" "AWG_UI_TLS_MODE" "$( [[ $USE_LETSENCRYPT -eq 1 ]] && echo "letsencrypt" || echo "self-signed" )"
 set_env_key "$CFG_DIR/webui.env" "AWG_UI_MASK_PORT" "$WEBUI_MASK_PORT"
+ensure_env_key "$CFG_DIR/webui.env" "AWG_UI_NTFY_PORT" "$WEBUI_NTFY_PORT"
 dedupe_env_file "$CFG_DIR/webui.env"
 chmod 600 "$CFG_DIR/webui.env"
 
@@ -915,6 +989,9 @@ if [[ $NO_START -eq 0 ]]; then
 fi
 
 configure_nginx_reverse_proxy
+
+log "Installing ntfy push notifications..."
+AWG_WEBUI_CFG_DIR="$CFG_DIR" bash /usr/local/sbin/awg-ntfy-install.sh || log "warning: awg-ntfy-install failed (push notifications unavailable)"
 
 log "Bootstrap completed."
 print_final_summary

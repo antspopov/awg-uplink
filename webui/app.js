@@ -590,14 +590,27 @@ function buildTunnelSaveBody() {
 async function saveTunnelSettings(state, options = {}) {
   const { silent = false, skipBusy = false } = options;
   const body = buildTunnelSaveBody();
+  const wanted = {
+    tunnel1: Boolean(body.tunnel1 && body.tunnel1.enabled),
+    tunnel2: Boolean(body.tunnel2 && body.tunnel2.enabled),
+  };
   const run = async () => postJson("/api/tunnels/save", body);
   const res = skipBusy ? await run() : await withBusyOverlay("Сохраняем проверку связи…", run);
+  let rejected = false;
   if (res && res.config) {
     applyTunnelsConfigToForm(res.config);
+    for (const tid of ["tunnel1", "tunnel2"]) {
+      const t = (res.config.tunnels && res.config.tunnels[tid]) || {};
+      if (typeof t.enabled === "boolean" && t.enabled !== wanted[tid]) {
+        rejected = true;
+        toast(t.toggle_lock_reason || "Состояние туннеля не изменено", "warn", 4500);
+        break;
+      }
+    }
   } else {
     await refreshTunnelsState(state, { skipFormApply: false });
   }
-  if (!silent) toast("Параметры проверки связи сохранены.", "ok");
+  if (!silent && !rejected) toast("Параметры проверки связи сохранены.", "ok");
   return res;
 }
 
@@ -1716,6 +1729,140 @@ function initDnsPanel() {
   });
 }
 
+async function refreshNotificationsPanel() {
+  try {
+    const res = await fetchJson("/api/notifications/config");
+    const cfg = (res && res.config) || {};
+    $("notifyEnabledToggle").checked = Boolean(cfg.enabled);
+    $("notifyServerUrl").value = cfg.server_url || "";
+    $("notifyTopic").value = cfg.topic || "";
+    await renderNotifyQr(cfg.subscribe_deeplink || "");
+    const alerts = cfg.alerts || {};
+    const tunnelsOn =
+      alerts.tunnels !== undefined
+        ? alerts.tunnels !== false
+        : alerts.tunnel_failover !== false || alerts.tunnel_down !== false;
+    $("notifyAlertTunnels").checked = tunnelsOn;
+    $("notifyAlertListErrors").checked = alerts.list_update_errors !== false;
+    $("notifyAlertServiceErrors").checked = alerts.service_start_errors !== false;
+
+    const svcOk = Boolean(cfg.ntfy_service_active);
+    const hasTopic = Boolean(cfg.topic);
+    if (!hasTopic) {
+      setStatusById("notifyServiceStatus", "dot--warn", "не настроено (запустите bootstrap)");
+    } else if (!svcOk) {
+      setStatusById("notifyServiceStatus", "dot--bad", "сервис ntfy не активен");
+    } else if (!cfg.enabled) {
+      setStatusById("notifyServiceStatus", "dot--muted", "отключено");
+    } else {
+      setStatusById("notifyServiceStatus", "dot--ok", "готово к отправке");
+    }
+  } catch (e) {
+    setStatusById("notifyServiceStatus", "dot--bad", "ошибка загрузки");
+  }
+}
+
+function copyNotifyField(inputId, label) {
+  const el = $(inputId);
+  const text = (el && el.value) || "";
+  if (!text) {
+    toast(`${label}: пусто`, "warn", 2200);
+    return;
+  }
+  navigator.clipboard
+    .writeText(text)
+    .then(() => toast(`${label} скопирован`, "ok", 1800))
+    .catch(() => toast("Не удалось скопировать", "error", 2200));
+}
+
+let notifyQrLibPromise = null;
+
+function loadNotifyQrLib() {
+  if (window.QRCode) return Promise.resolve(window.QRCode);
+  if (notifyQrLibPromise) return notifyQrLibPromise;
+  notifyQrLibPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `${basePath()}vendor/qrcode.min.js`;
+    script.async = true;
+    script.onload = () => {
+      if (window.QRCode) resolve(window.QRCode);
+      else reject(new Error("QRCode library missing"));
+    };
+    script.onerror = () => reject(new Error("QR library load failed"));
+    document.head.appendChild(script);
+  });
+  return notifyQrLibPromise;
+}
+
+async function renderNotifyQr(deeplink) {
+  const wrap = $("notifyQrWrap");
+  const canvas = $("notifyQrCanvas");
+  const err = $("notifyQrError");
+  if (!wrap || !canvas) return;
+  const link = String(deeplink || "").trim();
+  if (err) err.classList.add("hidden");
+  if (!link) {
+    wrap.classList.add("hidden");
+    return;
+  }
+  try {
+    const QRCode = await loadNotifyQrLib();
+    wrap.classList.remove("hidden");
+    await QRCode.toCanvas(canvas, link, {
+      width: 200,
+      margin: 1,
+      errorCorrectionLevel: "M",
+    });
+  } catch (e) {
+    wrap.classList.add("hidden");
+    if (err) err.classList.remove("hidden");
+    console.warn("notify QR render failed", e);
+  }
+}
+
+function initNotificationsPanel() {
+  $("notifyCopyServerBtn").addEventListener("click", () => copyNotifyField("notifyServerUrl", "URL сервера"));
+  $("notifyCopyTopicBtn").addEventListener("click", () => copyNotifyField("notifyTopic", "Topic"));
+
+  $("notifySaveBtn").addEventListener("click", async () => {
+    const btn = $("notifySaveBtn");
+    try {
+      btn.disabled = true;
+      await postJson("/api/notifications/save", {
+        enabled: $("notifyEnabledToggle").checked,
+        alerts: {
+          tunnels: $("notifyAlertTunnels").checked,
+          list_update_errors: $("notifyAlertListErrors").checked,
+          service_start_errors: $("notifyAlertServiceErrors").checked,
+        },
+      });
+      await refreshNotificationsPanel();
+      toast("Настройки уведомлений сохранены.", "ok", 2400);
+    } catch (e) {
+      toast(`Ошибка сохранения: ${e?.message || "unknown"}`, "error", 3200);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("notifyTestBtn").addEventListener("click", async () => {
+    const btn = $("notifyTestBtn");
+    try {
+      btn.disabled = true;
+      const res = await postJson("/api/notifications/test", {});
+      if (res && res.ok) {
+        toast("Тестовое уведомление отправлено.", "ok", 2600);
+      } else {
+        toast((res && res.error) || "Не удалось отправить", "error", 3600);
+      }
+    } catch (e) {
+      toast(`Ошибка: ${e?.message || "unknown"}`, "error", 3200);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function initMtprotoPanel(state) {
   const mtInstallBtn = $("mtpInstallBtn");
   let pendingMtprotoAction = "install";
@@ -2020,7 +2167,7 @@ function updateIfaceFwReservedUI(fw, cfg) {
         : ifaceIngressSplitActive(cfg)
           ? "ingress"
           : "egress";
-  chips.textContent = reserved.length ? reserved.join(", ") : "80, 443, 5000";
+  chips.textContent = reserved.length ? reserved.join(", ") : "80, 443, 5000, 5001";
   const ifaceLabel = applyOn === "ingress" ? "ingress" : "egress";
   note.textContent = `Порты ${chips.textContent} всегда открыты на интерфейсе ${ifaceLabel} (ingress=egress — на egress).`;
   if (ingField) {
@@ -2891,6 +3038,7 @@ async function main() {
   initWebUiUpdateBanner();
   initMtprotoPanel(state);
   initDnsPanel();
+  initNotificationsPanel();
   initInterfaceSave();
   initNetplanEditor();
   setInterfaceConfigGateLocked(true);
@@ -2902,6 +3050,7 @@ async function main() {
   await refreshSystemMetrics(state);
   await refreshMtprotoState(state);
   await refreshDnsPanel();
+  await refreshNotificationsPanel();
   setInterval(() => refreshTunnelsState(state), 5000);
   setInterval(() => refreshSystemMetrics(state), 2000);
   setInterval(() => refreshMtprotoState(state), 5000);

@@ -12,13 +12,14 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import tomllib
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 
 def _require_env(name: str) -> str:
@@ -892,7 +893,26 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return hmac.compare_digest(expected, response)
 
     def _default_iface_firewall(self) -> dict:
-        return {"enabled": True, "egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000]}
+        return {"enabled": True, "egress_tcp_ports": [22], "ingress_tcp_ports": [22, 80, 443, 5000, 5001]}
+
+    def _ntfy_port(self) -> int:
+        raw = os.environ.get("AWG_UI_NTFY_PORT", "").strip()
+        if not raw:
+            env_path = Path(self._webui_cfg_dir()) / "webui.env"
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("AWG_UI_NTFY_PORT="):
+                        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        if raw:
+            try:
+                n = int(raw)
+                if 1 <= n <= 65535:
+                    return n
+            except ValueError:
+                pass
+        return 5001
 
     def _mask_port(self) -> int:
         raw = (os.environ.get("AWG_UI_MASK_PORT") or "").strip()
@@ -914,7 +934,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return 5000
 
     def _reserved_tcp_ports(self) -> list[int]:
-        return sorted({80, 443, self._mask_port()})
+        return sorted({80, 443, self._mask_port(), self._ntfy_port()})
 
     @staticmethod
     def _strip_reserved_ports(ports: list[int], reserved: set[int]) -> list[int]:
@@ -1067,6 +1087,173 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _store_dns_config(self, cfg: dict):
         _mkdir(self._webui_cfg_dir())
         _write_text(self._webui_dns_json(), json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+
+    def _webui_notifications_json(self) -> str:
+        return str(Path(self._webui_cfg_dir()) / "notifications.json")
+
+    def _default_notifications_cfg(self) -> dict:
+        return {
+            "enabled": False,
+            "server_url": "",
+            "topic": "",
+            "publish_token": "",
+            "publisher_user": "awg-publisher",
+            "alerts": {
+                "tunnels": True,
+                "list_update_errors": True,
+                "service_start_errors": True,
+            },
+            "notify_state": {
+                "tunnel_down_active": False,
+                "tunnel_unavailable_notified": {},
+                "last_tunnel_failover_ts": 0,
+                "last_tunnel_down_ts": 0,
+            },
+        }
+
+    def _load_notifications_config(self) -> dict:
+        raw = _read_text(self._webui_notifications_json(), "")
+        base = self._default_notifications_cfg()
+        if not raw.strip():
+            return base
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            return base
+        if not isinstance(obj, dict):
+            return base
+        for key in ("enabled", "server_url", "topic", "publish_token", "publisher_user"):
+            if key in obj:
+                base[key] = obj[key]
+        alerts = obj.get("alerts")
+        if isinstance(alerts, dict):
+            norm = dict(base["alerts"])
+            if "tunnels" in alerts:
+                norm["tunnels"] = bool(alerts["tunnels"])
+            elif "tunnel_failover" in alerts or "tunnel_down" in alerts:
+                norm["tunnels"] = bool(alerts.get("tunnel_failover", True)) or bool(
+                    alerts.get("tunnel_down", True)
+                )
+            for k in ("list_update_errors", "service_start_errors"):
+                if k in alerts:
+                    norm[k] = bool(alerts[k])
+            base["alerts"] = norm
+        ns = obj.get("notify_state")
+        if isinstance(ns, dict):
+            for k in base["notify_state"]:
+                if k in ns:
+                    base["notify_state"][k] = ns[k]
+        if "_publisher_pass" in obj:
+            base["_publisher_pass"] = obj["_publisher_pass"]
+        return base
+
+    def _store_notifications_config(self, cfg: dict) -> None:
+        _mkdir(self._webui_cfg_dir())
+        _write_text(self._webui_notifications_json(), json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        try:
+            os.chmod(self._webui_notifications_json(), 0o600)
+        except OSError:
+            pass
+
+    def _ntfy_subscribe_deeplink(self, server_url: str, topic: str) -> str:
+        server_url = str(server_url or "").strip().rstrip("/")
+        topic = str(topic or "").strip().strip("/")
+        if not server_url or not topic:
+            return ""
+        try:
+            u = urlparse(server_url)
+            host = (u.hostname or "").strip()
+            if not host:
+                return ""
+            if u.port:
+                host = f"{host}:{u.port}"
+            display = quote("AWG Split Gate")
+            return f"ntfy://{host}/{topic}?display={display}"
+        except Exception:
+            return ""
+
+    def _notifications_public_payload(self) -> dict:
+        cfg = self._load_notifications_config()
+        server_url = str(cfg.get("server_url") or "").strip().rstrip("/")
+        topic = str(cfg.get("topic") or "").strip().strip("/")
+        ntfy_active = self._service_is_active("ntfy.service") or self._service_is_active("ntfy")
+        return {
+            "enabled": bool(cfg.get("enabled")),
+            "server_url": server_url,
+            "topic": topic,
+            "subscribe_deeplink": self._ntfy_subscribe_deeplink(server_url, topic),
+            "has_publish_token": bool(str(cfg.get("publish_token") or "").strip()),
+            "ntfy_service_active": ntfy_active,
+            "websocket_supported": ntfy_active,
+            "alerts": dict(cfg.get("alerts") or {}),
+            "notify_state": dict(cfg.get("notify_state") or {}),
+        }
+
+    def _notify_script_path(self) -> Path:
+        for p in (
+            Path("/usr/local/sbin/awg-ntfy-notify.py"),
+            Path(__file__).resolve().parent.parent / "lib" / "awg-ntfy-notify.py",
+        ):
+            if p.is_file():
+                return p
+        return Path("/usr/local/sbin/awg-ntfy-notify.py")
+
+    def _notify_service_start_error(self, service: str, error: str) -> None:
+        script = self._notify_script_path()
+        if not script.is_file():
+            return
+        payload = json.dumps({"service": service, "detail": error}, ensure_ascii=False)
+        env = os.environ.copy()
+        env["AWG_WEBUI_CFG_DIR"] = self._webui_cfg_dir()
+        try:
+            subprocess.run(
+                [sys.executable, str(script), "event", "--kind", "service_start_error", "--json", payload],
+                env=env,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    def _run_notify_test(self) -> tuple[bool, str]:
+        script = self._notify_script_path()
+        if not script.is_file():
+            return False, "awg-ntfy-notify.py not installed"
+        cfg = self._load_notifications_config()
+        if not cfg.get("enabled"):
+            return False, "Уведомления отключены"
+        env = os.environ.copy()
+        env["AWG_WEBUI_CFG_DIR"] = self._webui_cfg_dir()
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script), "test"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except Exception as ex:
+            return False, str(ex)
+        if proc.returncode == 0:
+            return True, ""
+        msg = (proc.stderr or proc.stdout or "send failed").strip()
+        return False, msg
+
+    def _op_notifications_save(self, body: dict) -> dict:
+        cur = self._load_notifications_config()
+        if "enabled" in body:
+            cur["enabled"] = bool(body.get("enabled"))
+        alerts_in = body.get("alerts")
+        if isinstance(alerts_in, dict):
+            cur["alerts"] = {
+                "tunnels": bool(alerts_in.get("tunnels", True)),
+                "list_update_errors": bool(alerts_in.get("list_update_errors", True)),
+                "service_start_errors": bool(alerts_in.get("service_start_errors", True)),
+            }
+        self._store_notifications_config(cur)
+        return {"ok": True, "config": self._notifications_public_payload()}
 
     def _service_is_active(self, unit: str) -> bool:
         rc, out, _ = _run(["systemctl", "is-active", unit], timeout=2.0)
@@ -1269,7 +1456,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _run(["systemctl", "start", "awg-uplink-dns-refresh.timer"], timeout=3.0)
         rc, out, err = _run(["systemctl", "start", "awg-uplink-dns-refresh.service"], timeout=180.0)
         if rc != 0:
-            raise RuntimeError((err or out or "awg-uplink-dns-refresh.service failed").strip())
+            msg = (err or out or "awg-uplink-dns-refresh.service failed").strip()
+            self._notify_service_start_error("awg-uplink-dns-refresh.service", msg)
+            raise RuntimeError(msg)
         self._restart_awg_uplink_firewall()
         _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
@@ -1396,26 +1585,27 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def _tunnel_manage_script(self) -> str:
         return "/usr/local/sbin/awg-uplink-tunnel-manage.py"
 
-    def _migrate_tunnels_config(self, cfg: dict) -> tuple[dict, bool]:
+    def _migrate_tunnels_config(self, cfg: dict, *, initial: bool = False) -> tuple[dict, bool]:
         """Дополнить tunnels.json после апгрейда (--update-files-only не создавал файл)."""
-        changed = not Path(self._tunnels_json_path()).exists()
+        changed = bool(initial)
         defaults = self._default_tunnels_config()
-        for tid in ("tunnel1", "tunnel2"):
-            ifname = self._tunnel_ifname_from_cfg(cfg, tid)
-            conf_paths = (
-                Path(f"/etc/amnezia/amneziawg/{ifname}.conf"),
-                Path(f"/etc/wireguard/{ifname}.conf"),
-            )
-            has_conf = any(p.exists() for p in conf_paths)
-            if has_conf and not cfg.get(tid, {}).get("enabled"):
-                cfg.setdefault(tid, {})["enabled"] = True
+        if initial:
+            for tid in ("tunnel1", "tunnel2"):
+                ifname = self._tunnel_ifname_from_cfg(cfg, tid)
+                conf_paths = (
+                    Path(f"/etc/amnezia/amneziawg/{ifname}.conf"),
+                    Path(f"/etc/wireguard/{ifname}.conf"),
+                )
+                has_conf = any(p.exists() for p in conf_paths)
+                if has_conf and not cfg.get(tid, {}).get("enabled"):
+                    cfg.setdefault(tid, {})["enabled"] = True
+                    changed = True
+            if Path("/etc/amnezia/amneziawg/awg-uplink.conf").exists() and str(cfg.get("active") or "") not in (
+                "tunnel1",
+                "tunnel2",
+            ):
+                cfg["active"] = "tunnel1"
                 changed = True
-        if Path("/etc/amnezia/amneziawg/awg-uplink.conf").exists() and str(cfg.get("active") or "") not in (
-            "tunnel1",
-            "tunnel2",
-        ):
-            cfg["active"] = "tunnel1"
-            changed = True
         h = cfg.setdefault("health", {})
         dh = defaults.get("health") if isinstance(defaults.get("health"), dict) else {}
         if not h.get("targets"):
@@ -1437,25 +1627,20 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 
     def _load_tunnels_config(self) -> dict:
         path = Path(self._tunnels_json_path())
-        if not path.exists():
+        initial = not path.exists() or not _read_text(str(path), "").strip()
+        if initial:
             cfg = self._default_tunnels_config()
-            cfg, changed = self._migrate_tunnels_config(cfg)
+            cfg, changed = self._migrate_tunnels_config(cfg, initial=True)
             if changed:
                 self._store_tunnels_config(cfg)
             return cfg
         raw = _read_text(str(path), "")
-        if not raw.strip():
-            cfg = self._default_tunnels_config()
-            cfg, changed = self._migrate_tunnels_config(cfg)
-            if changed:
-                self._store_tunnels_config(cfg)
-            return cfg
         try:
             obj = json.loads(raw)
             cfg = self._normalize_tunnels_config(obj if isinstance(obj, dict) else {})
         except Exception:
             cfg = self._default_tunnels_config()
-        cfg, changed = self._migrate_tunnels_config(cfg)
+        cfg, changed = self._migrate_tunnels_config(cfg, initial=False)
         if changed:
             self._store_tunnels_config(cfg)
         return cfg
@@ -2011,7 +2196,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         _run(["systemctl", "enable", "awg-webui-ifaces.service"], timeout=3.0)
         rc, out, err = _run(["systemctl", "restart", "awg-webui-ifaces.service"], timeout=5.0)
         if rc != 0:
-            raise RuntimeError((err or out or "failed to restart awg-webui-ifaces.service").strip())
+            msg = (err or out or "failed to restart awg-webui-ifaces.service").strip()
+            self._notify_service_start_error("awg-webui-ifaces.service", msg)
+            raise RuntimeError(msg)
         self._restart_awg_uplink_firewall()
         _run(["systemctl", "enable", "awg-uplink-dns-transport-lock.service"], timeout=3.0)
         _run(["systemctl", "restart", "awg-uplink-dns-transport-lock.service"], timeout=45.0)
@@ -3477,6 +3664,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 return self._send_text(401, "Unauthorized")
             return self._send_json(200, self._mtproto_install_status())
 
+        if sp == "/api/notifications/config":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            return self._send_json(200, {"config": self._notifications_public_payload()})
+
         if sp == "/api/op/status":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
@@ -3625,6 +3817,24 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             task_id = self._start_async_op("dns-save", lambda: self._op_dns_save(body))
             return self._send_json(202, {"ok": True, "task_id": task_id})
 
+        if sp == "/api/notifications/save":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            if not isinstance(body, dict):
+                body = {}
+            try:
+                result = self._op_notifications_save(body)
+                return self._send_json(200, result)
+            except Exception as ex:
+                return self._send_text(500, str(ex))
+
+        if sp == "/api/notifications/test":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            ok, err = self._run_notify_test()
+            return self._send_json(200, {"ok": bool(ok), "error": err or ""})
+
         if sp == "/api/netplan/save":
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
@@ -3711,7 +3921,9 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             unit = f"awg-quick@{ifname}.service"
             rc, out, err = _run(["systemctl", "restart", unit], timeout=12.0)
             if rc != 0:
-                return self._send_text(500, (err or out or f"failed to restart {unit}").strip())
+                msg = (err or out or f"failed to restart {unit}").strip()
+                self._notify_service_start_error(unit, msg)
+                return self._send_text(500, msg)
             routing_err = ""
             try:
                 self._apply_iface_routing()

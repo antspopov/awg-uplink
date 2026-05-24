@@ -123,21 +123,22 @@ def save_config(cfg: dict) -> None:
     os.chmod(TUNNELS_JSON, 0o600)
 
 
-def migrate_config(cfg: dict) -> tuple[dict, bool]:
+def migrate_config(cfg: dict, *, initial: bool = False) -> tuple[dict, bool]:
     """Апгрейд со старой установки: tunnels.json отсутствует или health.targets пуст."""
-    changed = not TUNNELS_JSON.exists()
+    changed = bool(initial)
     defaults = default_config()
-    for tid, ddef in TUNNEL_DEFS.items():
-        ifname = ddef["ifname"]
-        conf_paths = [AMNEZIA_DIR / f"{ifname}.conf", Path(f"/etc/wireguard/{ifname}.conf")]
-        has_conf = any(p.exists() for p in conf_paths)
-        if has_conf and not cfg.get(tid, {}).get("enabled"):
-            cfg[tid]["enabled"] = True
-            changed = True
-    if (AMNEZIA_DIR / "awg-uplink.conf").exists():
-        if cfg.get("active") not in TUNNEL_DEFS:
-            cfg["active"] = "tunnel1"
-            changed = True
+    if initial:
+        for tid, ddef in TUNNEL_DEFS.items():
+            ifname = ddef["ifname"]
+            conf_paths = [AMNEZIA_DIR / f"{ifname}.conf", Path(f"/etc/wireguard/{ifname}.conf")]
+            has_conf = any(p.exists() for p in conf_paths)
+            if has_conf and not cfg.get(tid, {}).get("enabled"):
+                cfg[tid]["enabled"] = True
+                changed = True
+        if (AMNEZIA_DIR / "awg-uplink.conf").exists():
+            if cfg.get("active") not in TUNNEL_DEFS:
+                cfg["active"] = "tunnel1"
+                changed = True
     h = cfg.setdefault("health", {})
     dh = defaults["health"]
     if not h.get("targets"):
@@ -154,8 +155,9 @@ def migrate_config(cfg: dict) -> tuple[dict, bool]:
 
 
 def cmd_migrate() -> None:
-    cfg = load_config()
-    cfg, changed = migrate_config(cfg)
+    initial = not TUNNELS_JSON.exists()
+    cfg = default_config() if initial else load_config()
+    cfg, changed = migrate_config(cfg, initial=initial)
     if changed:
         save_config(cfg)
         log("tunnels.json migrated/created")
@@ -191,7 +193,10 @@ def systemd_unit(ifname: str) -> str:
 def run_systemctl(*args: str, timeout: float = 30.0) -> bool:
     proc = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        log(f"systemctl {' '.join(args)} failed: {(proc.stderr or proc.stdout or '').strip()}")
+        msg = (proc.stderr or proc.stdout or "").strip()
+        log(f"systemctl {' '.join(args)} failed: {msg}")
+        if args and args[0] in ("start", "restart") and len(args) > 1:
+            _notify_event("service_start_error", {"service": args[1], "detail": msg})
         return False
     return True
 
@@ -422,6 +427,72 @@ def tunnel_ping_meta(cfg: dict, tid: str) -> dict:
     return {"ping_ok": False, "ping_checked": True, "ping_status": "нет связи (ping)"}
 
 
+NOTIFY_SCRIPT = Path("/usr/local/sbin/awg-ntfy-notify.py")
+
+
+def _notify_event(kind: str, payload: dict) -> None:
+    if not NOTIFY_SCRIPT.is_file():
+        return
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(NOTIFY_SCRIPT),
+                "event",
+                "--kind",
+                kind,
+                "--json",
+                json.dumps(payload, ensure_ascii=False),
+            ],
+            env={**os.environ, "AWG_WEBUI_CFG_DIR": str(CFG)},
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception as ex:
+        log(f"notify {kind}: {ex}")
+
+
+def _tunnel_label(cfg: dict, tid: str) -> str:
+    t = cfg.get(tid) if isinstance(cfg.get(tid), dict) else {}
+    return str(t.get("label") or TUNNEL_DEFS.get(tid, {}).get("label") or tid)
+
+
+def _assess_tunnel_alerts(cfg: dict, result: dict, *, fail_n: int) -> None:
+    en = enabled_tunnels(cfg)
+    if not en:
+        return
+    active = str(cfg.get("active") or en[0])
+    checks = result.get("checks") if isinstance(result.get("checks"), dict) else {}
+    hs = cfg.get("health_state", {})
+
+    for tid in en:
+        ok = bool(checks.get(tid))
+        st = hs.get(tid, {}) if isinstance(hs, dict) else {}
+        label = _tunnel_label(cfg, tid)
+        if ok:
+            _notify_event(
+                "tunnel_unavailable_recovered",
+                {"tunnel_id": tid, "tunnel_label": label},
+            )
+            continue
+        fail_streak = int(st.get("fail_streak", 0) or 0)
+        if fail_streak < fail_n:
+            continue
+        detail = "Ping через туннель недоступен."
+        if len(en) >= 2 and not any(bool(checks.get(t)) for t in en):
+            detail = "Все включённые туннели недоступны по ping."
+        _notify_event(
+            "tunnel_unavailable",
+            {
+                "tunnel_id": tid,
+                "tunnel_label": label,
+                "is_active": tid == active,
+                "detail": detail,
+            },
+        )
+
+
 def failover_once() -> dict:
     cfg = load_config()
     en = enabled_tunnels(cfg)
@@ -453,6 +524,7 @@ def failover_once() -> dict:
                 result["checks"][tid] = False
         save_config(cfg)
         result["active"] = cfg.get("active")
+        _assess_tunnel_alerts(cfg, result, fail_n=fail_n)
         return result
 
     t1, t2 = "tunnel1", "tunnel2"
@@ -463,6 +535,9 @@ def failover_once() -> dict:
     update_streak(cfg, t2, ok2)
 
     active = str(cfg.get("active") or "tunnel1")
+    prev_active = active
+    _assess_tunnel_alerts(cfg, result, fail_n=fail_n)
+
     hs = cfg.get("health_state", {})
     s1 = hs.get(t1, {})
     s2 = hs.get(t2, {})
@@ -480,6 +555,13 @@ def failover_once() -> dict:
     if new_active != active:
         cfg["active"] = new_active
         result["switched"] = True
+        _notify_event(
+            "tunnel_failover",
+            {
+                "from_tid": _tunnel_label(cfg, prev_active),
+                "to_tid": _tunnel_label(cfg, new_active),
+            },
+        )
 
     save_config(cfg)
     sync_iface_env(cfg)

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AWG Split Gate — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20260509-16" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-17" />
   </head>
   <body>
     <div class="app">
@@ -514,6 +514,131 @@
 
             <div class="help">
               Домены из защищённых готовых списков всегда уходят в dnscrypt; остальные готовые списки и include/exclude — при включённом режиме «по доменам» в georouting. Обновление списков — каждые 6 ч или по «Применить».
+            </div>
+          </div>
+
+          <div class="panel-sep"></div>
+
+          <div class="panel-head">
+            <div class="panel-head-left">
+              <h2>Push-уведомления (ntfy)</h2>
+              <div class="status" id="notifyServiceStatus">
+                <span class="dot dot--unknown"></span>
+                <span class="status-text">не загружено</span>
+              </div>
+            </div>
+            <div class="users-head-right">
+              <button class="btn" id="notifyTestBtn" type="button">Тестовое уведомление</button>
+              <button class="btn btn--primary" id="notifySaveBtn" type="button">Сохранить</button>
+            </div>
+          </div>
+
+          <div class="card notify-card">
+            <div class="help notify-intro">
+              Уведомления на Android и iOS через приложение <strong>ntfy</strong>. Сервер на этом шлюзе;
+              подписка — по QR (Android) или вручную по URL сервера и topic.
+            </div>
+
+            <div class="field notify-app-links">
+              <label>Скачать приложение ntfy</label>
+              <div class="store-links notify-store-links">
+                <a
+                  class="store-link store-link--play"
+                  href="https://play.google.com/store/apps/details?id=io.heckel.ntfy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Google Play (Android)</a>
+                <a
+                  class="store-link store-link--apple"
+                  href="https://apps.apple.com/app/ntfy/id1625399547"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >App&nbsp;Store (iPhone / iPad)</a>
+                <a
+                  class="store-link store-link--fdroid"
+                  href="https://f-droid.org/packages/io.heckel.ntfy/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >F-Droid (Android)</a>
+              </div>
+            </div>
+
+            <div class="field notify-enable-row">
+              <div class="dns-amnezia-watch-row">
+                <label class="dns-amnezia-watch-text" for="notifyEnabledToggle">
+                  Включить отправку уведомлений с шлюза
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="notifyEnabledToggle" role="switch" />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="notify-subscribe-block">
+              <div class="field">
+                <label>URL сервера ntfy (для приложения)</label>
+                <div class="notify-copy-row">
+                  <input type="text" id="notifyServerUrl" class="input notify-input" readonly spellcheck="false" />
+                  <button class="btn btn--sm" type="button" id="notifyCopyServerBtn">Копировать</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Topic (канал)</label>
+                <div class="notify-copy-row">
+                  <input type="text" id="notifyTopic" class="input notify-input" readonly spellcheck="false" />
+                  <button class="btn btn--sm" type="button" id="notifyCopyTopicBtn">Копировать</button>
+                </div>
+              </div>
+              <div class="field notify-qr-field">
+                <label>Подписка (QR для Android)</label>
+                <div id="notifyQrWrap" class="notify-qr-wrap hidden">
+                  <canvas id="notifyQrCanvas" class="notify-qr-canvas" width="200" height="200" aria-label="QR-код подписки ntfy"></canvas>
+                </div>
+                <div id="notifyQrError" class="help notify-qr-error hidden">
+                  Не удалось построить QR-код. Используйте URL сервера и topic выше.
+                </div>
+                <div class="help notify-qr-hint">
+                  Отсканируйте камерой телефона — откроется приложение ntfy и предложит подписаться.
+                  На iOS QR с <code>ntfy://</code> обычно не работает: укажите URL сервера и topic вручную.
+                </div>
+              </div>
+            </div>
+
+            <div class="help notify-apps-help">
+              <strong>Подключение:</strong> в ntfy укажите URL сервера как default server, затем topic (или QR на Android).
+              <strong>WebSocket</strong> можно включить в настройках подписки — сервер поддерживает и WebSocket, и обычный режим (JSON stream).
+              Самоподписанный сертификат — разрешите в настройках приложения вручную.
+            </div>
+
+            <div class="notify-alerts-grid">
+              <div class="field notify-alert-row">
+                <label class="dns-amnezia-watch-text" for="notifyAlertTunnels">
+                  Туннели (failover, недоступность, восстановление)
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="notifyAlertTunnels" role="switch" checked />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="field notify-alert-row">
+                <label class="dns-amnezia-watch-text" for="notifyAlertListErrors">
+                  Ошибки обновления списков (georouting)
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="notifyAlertListErrors" role="switch" checked />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="field notify-alert-row">
+                <label class="dns-amnezia-watch-text" for="notifyAlertServiceErrors">
+                  Ошибки запуска сервисов
+                </label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="notifyAlertServiceErrors" role="switch" checked />
+                  <span class="toggle-switch-slider" aria-hidden="true"></span>
+                </label>
+              </div>
             </div>
           </div>
 

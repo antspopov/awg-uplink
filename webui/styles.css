@@ -826,6 +826,102 @@ body::before {
   line-height: 1.35;
 }
 
+.notify-card {
+  margin-top: 12px;
+}
+
+.notify-intro {
+  margin-bottom: 12px;
+}
+
+.notify-app-links {
+  margin-bottom: 12px;
+}
+
+.notify-app-links label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.notify-store-links {
+  margin-top: 0;
+}
+
+.store-link--fdroid {
+  border-color: rgba(129, 199, 132, 0.35);
+  background: linear-gradient(135deg, rgba(129, 199, 132, 0.15), rgba(76, 175, 80, 0.08));
+}
+
+.notify-enable-row {
+  margin-bottom: 12px;
+}
+
+.notify-subscribe-block {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.notify-copy-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.notify-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.notify-qr-field {
+  margin-top: 4px;
+}
+
+.notify-qr-wrap {
+  display: flex;
+  justify-content: flex-start;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  width: fit-content;
+}
+
+.notify-qr-canvas {
+  display: block;
+}
+
+.notify-qr-hint {
+  margin-top: 8px;
+}
+
+.notify-qr-error {
+  margin-top: 8px;
+  color: var(--warn, #c9a227);
+}
+
+.notify-apps-help {
+  margin-bottom: 14px;
+}
+
+.notify-alerts-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.notify-alert-row {
+  margin: 0;
+}
+
+@media (min-width: 720px) {
+  .notify-alerts-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .toggle-switch {
   position: relative;
   display: inline-block;

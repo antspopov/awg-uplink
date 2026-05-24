@@ -10,8 +10,8 @@
 - **Без пакета ufw** — те же ограничения через nftables (`inet awg_webui_fw`); переключатель «выкл»
   только снимает эту таблицу.
 
-Порты 80, 443 и masking (AWG_UI_MASK_PORT, по умолчанию 5000) всегда открываются на ingress при split
-или на egress, если ingress совпадает с egress.
+Порты 80, 443, masking (AWG_UI_MASK_PORT, по умолчанию 5000) и ntfy (AWG_UI_NTFY_PORT,
+по умолчанию 5001) всегда открываются на ingress при split или на egress, если ingress совпадает с egress.
 
 Georouting / DNS-transport-lock — отдельные nft-таблицы.
 
@@ -37,6 +37,7 @@ NFT_TABLE = "awg_webui_fw"
 AWG_IFACE = os.environ.get("AWG_FW_AWG_IFACE", "awg-uplink").strip() or "awg-uplink"
 UFW_MARKER = "awg-web-ui-fw"
 DEFAULT_MASK_PORT = 5000
+DEFAULT_NTFY_PORT = 5001
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -77,8 +78,26 @@ def load_mask_port() -> int:
     return DEFAULT_MASK_PORT
 
 
+def load_ntfy_port() -> int:
+    raw = (os.environ.get("AWG_UI_NTFY_PORT") or "").strip()
+    if not raw and WEBUI_ENV.exists():
+        for line in WEBUI_ENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("AWG_UI_NTFY_PORT="):
+                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    if raw:
+        try:
+            n = int(raw)
+            if 1 <= n <= 65535:
+                return n
+        except ValueError:
+            pass
+    return DEFAULT_NTFY_PORT
+
+
 def reserved_tcp_ports() -> list[int]:
-    return sorted({80, 443, load_mask_port()})
+    return sorted({80, 443, load_mask_port(), load_ntfy_port()})
 
 
 def effective_fw_ports(
@@ -98,7 +117,7 @@ def effective_fw_ports(
 
 def load_fw_ports() -> tuple[list[int], list[int]]:
     eg = [22]
-    ing = [22, 80, 443, load_mask_port()]
+    ing = [22, 80, 443, load_mask_port(), load_ntfy_port()]
     fw = None
     if IFACE_JSON.exists():
         try:

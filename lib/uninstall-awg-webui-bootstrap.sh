@@ -87,6 +87,8 @@ disable_matching_units() {
 	systemctl disable --now "awg-quick@${CANON_STEM}.service" 2>/dev/null || true
 	systemctl disable --now "awg-quick@awg-uplink-2.service" 2>/dev/null || true
 	systemctl disable --now awg-uplink-tunnel-failover.service 2>/dev/null || true
+	systemctl disable --now ntfy.service 2>/dev/null || true
+	systemctl disable --now ntfy 2>/dev/null || true
 }
 
 remove_unit_files() {
@@ -188,7 +190,16 @@ rm -f -- \
 	/usr/local/sbin/awg-uplink-dns-transport-lock.py \
 	/usr/local/sbin/awg-uplink-firewall-apply.py \
 	/usr/local/sbin/awg-mtproto-install.sh \
+	/usr/local/sbin/awg-ntfy-install.sh \
+	/usr/local/sbin/awg-ntfy-notify.py \
+	/usr/local/sbin/awg-uplink-tunnel-manage.py \
 	/usr/local/sbin/awg-webui-self-update.sh
+
+if [[ -f /etc/ntfy/server.yml ]] && grep -q 'Managed by awg-ntfy-install.sh' /etc/ntfy/server.yml 2>/dev/null; then
+	log "удаление конфигурации ntfy (AWG Split Gate)"
+	rm -f -- /etc/ntfy/server.yml /var/lib/ntfy/user.db
+fi
+rm -f -- /etc/apt/sources.list.d/ntfy.list /etc/apt/keyrings/ntfy.gpg
 
 log "nginx: сайт Web UI и самоподписанные сертификаты"
 rm -f -- "$NGINX_SITE_LINK" "$NGINX_SITE_PATH"
