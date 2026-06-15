@@ -3392,11 +3392,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     if s.endswith(":") and " " not in s[:-1]:
                         current_user = s[:-1].strip()
                         continue
-                    if s.startswith("tg:"):
+                    if "tg:" in s.lower():
                         tg = s.split("tg:", 1)[1].strip()
                         if current_user and tg.startswith("tg://"):
                             links_by_user[current_user] = tg
-                    if s.startswith("t.me:"):
+                    if "t.me:" in s.lower():
                         tme = s.split("t.me:", 1)[1].strip()
                         if current_user and tme.startswith("http"):
                             links_tme_by_user[current_user] = tme
