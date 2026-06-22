@@ -635,6 +635,113 @@ def _mtproto_public_ip_from_iface(iface: dict) -> str:
     return ingress_ip
 
 
+def _is_gray_ipv4(ip: str) -> bool:
+    """Серые адреса: RFC1918 и CGNAT 100.64.0.0/10 (как в awg-webui-iface-routing-apply.sh)."""
+    try:
+        addr = ipaddress.IPv4Address(str(ip).strip())
+    except Exception:
+        return False
+    if addr.is_private:
+        return True
+    try:
+        return addr in ipaddress.IPv4Network("100.64.0.0/10")
+    except Exception:
+        return False
+
+
+def _fetch_external_ipv4(bind_dev: str = "") -> str:
+    if not shutil.which("curl"):
+        return ""
+    probes = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+    ]
+    for url in probes:
+        cmd = ["curl", "-4", "--connect-timeout", "2", "--max-time", "5", "-fsSL", url]
+        dev = str(bind_dev or "").strip()
+        if dev:
+            cmd[2:2] = ["--interface", dev]
+        rc, out, _ = _run(cmd, timeout=6.0)
+        if rc != 0:
+            continue
+        ip = (out or "").strip()
+        if _ipv4_literal_ok(ip):
+            return ip
+    return ""
+
+
+def _mtproto_link_server_host(iface: dict) -> str:
+    """Хост для tg:// / t.me ссылок MTProto (не public_ip из config.toml)."""
+    if not isinstance(iface, dict):
+        iface = {}
+    domain = _read_webui_env_value("AWG_UI_DOMAIN", "").strip()
+    if domain and not _webui_tls_self_signed():
+        return domain
+
+    ip = _mtproto_public_ip_from_iface(iface)
+    if not ip:
+        return domain
+
+    if not _is_gray_ipv4(ip):
+        return ip
+
+    egress_dev = str(iface.get("egress_dev", "")).strip()
+    ingress_dev = str(iface.get("ingress_dev", "")).strip()
+    bind_dev = ingress_dev if _iface_split_active(iface) else egress_dev
+    for dev in (bind_dev, egress_dev, ""):
+        ext = _fetch_external_ipv4(dev)
+        if ext and not _is_gray_ipv4(ext):
+            return ext
+    return ip
+
+
+def _mtproto_tls_domain(censor_sec: dict) -> str:
+    if not isinstance(censor_sec, dict):
+        return ""
+    return str(censor_sec.get("tls_domain", "") or "").strip().strip('"')
+
+
+def _mtproto_uses_faketls(censor_sec: dict) -> bool:
+    if not isinstance(censor_sec, dict):
+        return False
+    mask_raw = str(censor_sec.get("mask", "")).strip().lower()
+    mask_on = mask_raw in ("true", "1", "yes", "on")
+    return mask_on and bool(_mtproto_tls_domain(censor_sec))
+
+
+def _mtproto_link_secret_encoded(user_secret: str, censor_sec: dict) -> str:
+    secret = str(user_secret or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", secret):
+        return ""
+    if _mtproto_uses_faketls(censor_sec):
+        dom = _mtproto_tls_domain(censor_sec)
+        try:
+            dom_hex = dom.encode("ascii").hex()
+        except Exception:
+            return ""
+        if not dom_hex:
+            return ""
+        return f"ee{secret}{dom_hex}"
+    return f"dd{secret}"
+
+
+def _build_mtproto_proxy_links(
+    host: str, port: int, user_secret: str, censor_sec: dict
+) -> tuple[str, str]:
+    host = str(host or "").strip()
+    encoded = _mtproto_link_secret_encoded(user_secret, censor_sec)
+    if not host or not encoded:
+        return "", ""
+    try:
+        port_i = int(port)
+    except Exception:
+        return "", ""
+    if port_i <= 0 or port_i > 65535:
+        return "", ""
+    q = f"server={quote(host, safe='')}&port={port_i}&secret={encoded}"
+    return f"tg://proxy?{q}", f"https://t.me/proxy?{q}"
+
+
 def _read_webui_env_value(key: str, default: str = "") -> str:
     env_path = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui")) / "webui.env"
     if not env_path.is_file():
@@ -3377,29 +3484,26 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         )
         monitor_sec = parsed.get("monitor", {}) if isinstance(parsed.get("monitor", {}), dict) else {}
 
+        iface_for_links = self._load_iface_config()
+        if not isinstance(iface_for_links, dict):
+            iface_for_links = {}
+        link_host = _mtproto_link_server_host(iface_for_links)
+        try:
+            link_port = int(server_sec.get("public_port") or server_sec.get("port", 443) or 443)
+        except Exception:
+            link_port = 443
         links_by_user: dict[str, str] = {}
         links_tme_by_user: dict[str, str] = {}
         links_raw: list[str] = []
-        if cfg_text:
-            rc, out, _ = _run(["mtbuddy", "links", "--config", cfg_path], timeout=3.0)
-            if rc == 0:
-                current_user = ""
-                for line in out.splitlines():
-                    s = line.strip()
-                    if not s:
-                        continue
-                    links_raw.append(s)
-                    if s.endswith(":") and " " not in s[:-1]:
-                        current_user = s[:-1].strip()
-                        continue
-                    if s.startswith("tg:"):
-                        tg = s.split("tg:", 1)[1].strip()
-                        if current_user and tg.startswith("tg://"):
-                            links_by_user[current_user] = tg
-                    if s.startswith("t.me:"):
-                        tme = s.split("t.me:", 1)[1].strip()
-                        if current_user and tme.startswith("http"):
-                            links_tme_by_user[current_user] = tme
+        if cfg_text and link_host:
+            for u, sec in users.items():
+                tg, tme = _build_mtproto_proxy_links(link_host, link_port, sec, censor_sec)
+                if tg:
+                    links_by_user[u] = tg
+                    links_tme_by_user[u] = tme
+                    links_raw.append(f"{u}:")
+                    links_raw.append(f"  tg: {tg}")
+                    links_raw.append(f"  t.me: {tme}")
 
         # Parse latest session counters from mtproto-proxy logs:
         # users_total=3 unassigned=2 users{alice=1,bob=0}
@@ -3514,14 +3618,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 uname = str(u.get("username", ""))
                 u["sessions"] = int(per_user.get(uname, 0) or 0)
                 it = users_api_map.get(uname, {})
-                # Prefer dashboard links if present.
-                if isinstance(it, dict):
-                    if it.get("tg_link"):
-                        u["link"] = str(it.get("tg_link"))
-                    if it.get("tme_link"):
-                        u["link_tme"] = str(it.get("tme_link"))
-                    if "enabled" in it:
-                        u["enabled"] = bool(it.get("enabled"))
+                if isinstance(it, dict) and "enabled" in it:
+                    u["enabled"] = bool(it.get("enabled"))
 
             users_total = len(users_out)
             sessions_total = int(proxy.get("users_active_total", 0) or 0)
