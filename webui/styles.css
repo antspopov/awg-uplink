@@ -636,10 +636,51 @@ body::before {
 }
 
 .tunnel-failover-hint {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   font-size: 13px;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.68);
+}
+
+.tunnel-stack-line {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.tunnel-stack-line.is-ok {
+  color: rgba(52, 211, 153, 0.9);
+}
+
+.tunnel-stack-line.is-warn {
+  color: rgba(251, 191, 36, 0.95);
+}
+
+.tunnel-proto-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  border: 1px solid rgba(106, 228, 255, 0.35);
+  color: rgba(106, 228, 255, 0.95);
+  background: rgba(106, 228, 255, 0.08);
+}
+
+.tunnel-proto-badge.is-31 {
+  border-color: rgba(52, 211, 153, 0.4);
+  color: rgba(52, 211, 153, 0.95);
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.tunnel-proto-badge.is-20 {
+  border-color: rgba(139, 92, 246, 0.45);
+  color: rgba(196, 181, 253, 0.95);
+  background: rgba(139, 92, 246, 0.12);
 }
 
 .tunnel-dual-grid {

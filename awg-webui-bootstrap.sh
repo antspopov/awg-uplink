@@ -16,6 +16,9 @@ AMNEZIA_APT_LIST=/etc/apt/sources.list.d/amnezia-ppa.list
 AMNEZIAWG_SRC_CACHE=${AMNEZIAWG_SRC_CACHE:-/var/cache/awg-uplink-amneziawg}
 AMNEZIAWG_KERNEL_REPO=${AMNEZIAWG_KERNEL_REPO:-https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git}
 AMNEZIAWG_TOOLS_REPO=${AMNEZIAWG_TOOLS_REPO:-https://github.com/amnezia-vpn/amneziawg-tools.git}
+# Модуль 3.1 поднимает конфиги 1.x/2.0/3.1; стек старше 3.1 не принимает ключи 3.1.
+AMNEZIAWG_MIN_MAJOR=3
+AMNEZIAWG_MIN_MINOR=1
 
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'
@@ -463,12 +466,100 @@ awg_quick_present() {
   command -v awg-quick >/dev/null 2>&1
 }
 
+amneziawg_tools_version() {
+  command -v awg >/dev/null 2>&1 || return 0
+  awg --version 2>/dev/null || true
+}
+
+amneziawg_module_version() {
+  if [[ -r /sys/module/amneziawg/version ]]; then
+    cat /sys/module/amneziawg/version 2>/dev/null || true
+    return 0
+  fi
+  if command -v modinfo >/dev/null 2>&1; then
+    modinfo -F version amneziawg 2>/dev/null || true
+  fi
+}
+
+# true, если строка содержит X.Y и версия ≥ AMNEZIAWG_MIN_MAJOR.MINOR (например 3.1).
+amneziawg_ver_ge_min() {
+  local raw=${1:-}
+  local ver maj min
+  ver=$(printf '%s\n' "$raw" | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+  [[ -n "$ver" ]] || return 1
+  maj=${ver%%.*}
+  min=${ver#*.}
+  [[ "$maj" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ ]] || return 1
+  if ((maj > AMNEZIAWG_MIN_MAJOR)); then
+    return 0
+  fi
+  if ((maj == AMNEZIAWG_MIN_MAJOR && min >= AMNEZIAWG_MIN_MINOR)); then
+    return 0
+  fi
+  return 1
+}
+
 # Не полагаемся на dpkg/DKMS в одиночку: в dkms status бывает «added/built» без модуля для текущего ядра,
 # а awg-quick может остаться от amneziawg-tools. «Готово» только если утилита есть и ядро видит модуль.
 amneziawg_stack_ready() {
   awg_quick_present || return 1
   modprobe -n amneziawg &>/dev/null || return 1
   return 0
+}
+
+# Стек готов к конфигам AWG 3.1: tools и загруженный/дисковый модуль ≥ 3.1.
+amneziawg_stack_is_31() {
+  amneziawg_stack_ready || return 1
+  amneziawg_ver_ge_min "$(amneziawg_tools_version)" || return 1
+  amneziawg_ver_ge_min "$(amneziawg_module_version)" || return 1
+  return 0
+}
+
+amneziawg_stop_tunnels_for_kmod() {
+  local unit
+  for unit in awg-quick@awg-uplink.service awg-quick@awg-uplink-2.service; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      log "останавливаю $unit перед сменой модуля amneziawg"
+      systemctl stop "$unit" || true
+    fi
+  done
+}
+
+amneziawg_unload_kmod() {
+  if lsmod 2>/dev/null | grep -q '^amneziawg[[:space:]]'; then
+    log "выгружаю модуль amneziawg"
+    rmmod amneziawg 2>/dev/null || modprobe -r amneziawg 2>/dev/null || \
+      log "warning: не удалось выгрузить amneziawg (интерфейс может быть занят)"
+  fi
+}
+
+amneziawg_load_kmod() {
+  depmod -a 2>/dev/null || true
+  modprobe amneziawg 2>/dev/null || true
+}
+
+amneziawg_git_sync_31() {
+  local dest=$1 url=$2
+  if [[ -d "$dest/.git" ]]; then
+    git -C "$dest" fetch --all --tags --prune
+  else
+    rm -rf "$dest"
+    git clone "$url" "$dest"
+    git -C "$dest" fetch --tags --prune || true
+  fi
+  local tag=""
+  local old_pf
+  old_pf=$(set +o | grep -E 'pipefail$' || true)
+  set +o pipefail
+  tag=$(git -C "$dest" tag -l 'v3.1.*' --sort=-v:refname | head -1 || true)
+  eval "$old_pf" 2>/dev/null || set -o pipefail
+  if [[ -n "$tag" ]]; then
+    log "source: checkout $tag ($(basename "$dest"))"
+    git -C "$dest" checkout -f "$tag"
+  else
+    log "source: нет тега v3.1.* — origin/HEAD ($(basename "$dest"))"
+    git -C "$dest" reset --hard origin/HEAD
+  fi
 }
 
 add_amnezia_apt_debian() {
@@ -515,13 +606,19 @@ ensure_amneziawg_kmod_after_apt() {
 }
 
 ensure_amneziawg() {
-  if amneziawg_stack_ready; then
-    log "AmneziaWG (awg-quick и модуль/DKMS) уже в порядке — шаг пропускается."
+  if amneziawg_stack_is_31; then
+    log "AmneziaWG ≥ ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR} уже установлен (tools: $(amneziawg_tools_version | tr '\n' ' '); модуль: $(amneziawg_module_version | tr '\n' ' ')) — шаг пропускается."
     return 0
   fi
-  if awg_quick_present; then
+  if amneziawg_stack_ready; then
+    log "стек AmneziaWG старше ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR} (tools: $(amneziawg_tools_version | tr '\n' ' '); модуль: $(amneziawg_module_version | tr '\n' ' ')) — обновляю. Конфиги 2.0 не переписываются."
+  elif awg_quick_present; then
     log "awg-quick в PATH, но стек AmneziaWG неполный — доустановка через apt/источник…"
+  else
+    log "AmneziaWG не найден — установка ≥ ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR}…"
   fi
+  amneziawg_stop_tunnels_for_kmod
+  amneziawg_unload_kmod
   [[ -f /etc/os-release ]] || die "missing /etc/os-release"
   # shellcheck disable=SC1091
   . /etc/os-release
@@ -535,13 +632,21 @@ ensure_amneziawg() {
   esac
   apt-get update -qq
   if apt-get install -y amneziawg; then
+    apt-get install -y amneziawg-dkms amneziawg-tools 2>/dev/null || true
     awg_quick_present || die "amneziawg installed but awg-quick not found"
     ensure_amneziawg_kmod_after_apt || die "amneziawg из apt установлен, но модуль ядра недоступен для $(uname -r) (проверьте dkms status, /var/lib/dkms/amneziawg/*/build/make.log; после смены ядра может понадобиться reboot)"
-    log "amneziawg installed from apt."
-    return 0
+    amneziawg_load_kmod
+    if amneziawg_stack_is_31; then
+      log "amneziawg ≥ ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR} установлен из apt."
+      return 0
+    fi
+    log "пакеты apt установлены, но версия всё ещё < ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR} — сборка из исходников (тег v3.1.*)."
+  else
+    log "amneziawg apt install failed, fallback to source build..."
   fi
-  log "amneziawg apt install failed, fallback to source build..."
   ensure_amneziawg_from_source
+  amneziawg_load_kmod
+  amneziawg_stack_is_31 || die "не удалось получить AmneziaWG ≥ ${AMNEZIAWG_MIN_MAJOR}.${AMNEZIAWG_MIN_MINOR} (tools: $(amneziawg_tools_version | tr '\n' ' '); модуль: $(amneziawg_module_version | tr '\n' ' '))"
 }
 
 ensure_amneziawg_from_source() {
@@ -554,25 +659,14 @@ ensure_amneziawg_from_source() {
   local kroot="$AMNEZIAWG_SRC_CACHE/amneziawg-linux-kernel-module"
   local troot="$AMNEZIAWG_SRC_CACHE/amneziawg-tools"
 
-  if [[ -d "$kroot/.git" ]]; then
-    git -C "$kroot" fetch --all --tags --prune
-    git -C "$kroot" reset --hard origin/HEAD
-  else
-    rm -rf "$kroot"
-    git clone "$AMNEZIAWG_KERNEL_REPO" "$kroot"
-  fi
-  if [[ -d "$troot/.git" ]]; then
-    git -C "$troot" fetch --all --tags --prune
-    git -C "$troot" reset --hard origin/HEAD
-  else
-    rm -rf "$troot"
-    git clone "$AMNEZIAWG_TOOLS_REPO" "$troot"
-  fi
+  amneziawg_git_sync_31 "$kroot" "$AMNEZIAWG_KERNEL_REPO"
+  amneziawg_git_sync_31 "$troot" "$AMNEZIAWG_TOOLS_REPO"
 
   local dver
   dver=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "$kroot/dkms.conf" | head -1)
   [[ -n "$dver" ]] || die "cannot read PACKAGE_VERSION from $kroot/dkms.conf"
 
+  amneziawg_unload_kmod
   dkms remove -m amneziawg -v "$dver" --all --force 2>/dev/null || true
   rm -rf /usr/src/amneziawg-* 2>/dev/null || true
 
@@ -585,9 +679,9 @@ ensure_amneziawg_from_source() {
   install -m 755 "$troot/src/awg" /usr/bin/awg
   install -m 755 "$troot/src/awg-quick/linux.bash" /usr/bin/awg-quick
 
-  modprobe amneziawg 2>/dev/null || true
+  amneziawg_load_kmod
   awg_quick_present || die "source build completed but awg-quick missing"
-  log "amneziawg installed from source fallback."
+  log "amneziawg установлен из исходников (линейка 3.1)."
 }
 
 ensure_env_key() {
@@ -629,8 +723,10 @@ Installs AWG Web UI runtime:
   --uninstall   Полное удаление того, что ставит этот bootstrap (юниты, конфиги, nginx, пакеты apt,
                 amneziawg). См. lib/uninstall-awg-webui-bootstrap.sh.
 
-  --update-files-only --install-deps   Вместе с копированием файлов: apt-get install зависимостей и ensure_amneziawg
-                (без смены webui.env, nginx и сертификатов).
+  --update-files-only              Обновить файлы приложения и runtime; при необходимости поднять AmneziaWG до ≥ 3.1
+                                  (конфиги туннелей 2.0 не переписываются). Без мастера HTTPS.
+  --update-files-only --install-deps   То же плюс apt-get install зависимостей панели (python, nginx, …)
+                                  (без смены webui.env, nginx и сертификатов).
 
 EOF
 }
@@ -705,9 +801,8 @@ if [[ $UPDATE_FILES_ONLY -eq 0 || $INSTALL_DEPS_ON_UPDATE -eq 1 ]] && command -v
   dnsmasq_quarantine_bind_interfaces_snippets
 fi
 
-if [[ $UPDATE_FILES_ONLY -eq 0 || $INSTALL_DEPS_ON_UPDATE -eq 1 ]]; then
+# AmneziaWG ≥ 3.1 нужен и при --update-files-only (иначе шлюзы останутся на 2.0).
 ensure_amneziawg
-fi
 
 log "Creating directories..."
 install -d -m 755 "$APP_DIR"
