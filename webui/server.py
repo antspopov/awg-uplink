@@ -370,11 +370,15 @@ def _sanitize_tunnel_config(cfg_text: str) -> str:
 
         if in_iface:
             # Remove DNS lines and all routing hooks for this stage.
+            # AWG obfuscation keys (2.0 and 3.1) are preserved as-is:
+            # Jc/Jmin/Jmax, S1–S4, H1–H4, I1–I5, HeaderProtectionKey,
+            # ContentPaddingAddition, RekeyAfterTime, RekeyTimeout, RejectAfterTime,
+            # KeepaliveTimeout, MaxHandshakeAttempts, RandomTrailers, DisableCookies.
             if re.match(r"^\s*DNS\s*=", line):
                 continue
             if re.match(r"^\s*PostUp\s*=", line) or re.match(r"^\s*PostDown\s*=", line):
                 continue
-            # Remove empty Amnezia I* keys.
+            # Remove empty Amnezia I* keys (awg-quick on older tools chokes on I1=).
             m_i = re.match(r"^\s*I[0-9]+\s*=\s*(.*)$", line)
             if m_i and not m_i.group(1).strip():
                 continue
@@ -408,6 +412,205 @@ def _sanitize_tunnel_config(cfg_text: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+_AWG31_KEYS = frozenset(
+    {
+        "headerprotectionkey",
+        "contentpaddingaddition",
+        "rekeyaftertime",
+        "rekeytimeout",
+        "rejectaftertime",
+        "keepalivetimeout",
+        "maxhandshakeattempts",
+        "randomtrailers",
+        "disablecookies",
+    }
+)
+_AWG31_RANGE_KEYS = frozenset(
+    {
+        "contentpaddingaddition",
+        "rekeyaftertime",
+        "rekeytimeout",
+        "rejectaftertime",
+        "keepalivetimeout",
+        "maxhandshakeattempts",
+    }
+)
+_AWG31_ONOFF_KEYS = frozenset({"randomtrailers", "disablecookies"})
+_AWG_KEY_DISPLAY = {
+    "headerprotectionkey": "HeaderProtectionKey",
+    "contentpaddingaddition": "ContentPaddingAddition",
+    "rekeyaftertime": "RekeyAfterTime",
+    "rekeytimeout": "RekeyTimeout",
+    "rejectaftertime": "RejectAfterTime",
+    "keepalivetimeout": "KeepaliveTimeout",
+    "maxhandshakeattempts": "MaxHandshakeAttempts",
+    "randomtrailers": "RandomTrailers",
+    "disablecookies": "DisableCookies",
+}
+_AWG_RANGE_RE = re.compile(r"^\d+(-\d+)?$")
+_AWG_ONOFF_RE = re.compile(r"^(on|off)$", re.I)
+
+
+def _iface_kv_from_conf(cfg_text: str) -> dict[str, str]:
+    kv: dict[str, str] = {}
+    in_iface = False
+    for raw in cfg_text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_iface = s[1:-1].strip().lower() == "interface"
+            continue
+        if not in_iface or not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        key = k.strip().lower()
+        if key:
+            kv[key] = v.strip()
+    return kv
+
+
+def _classify_awg_protocol(cfg_text: str) -> str:
+    """Вернуть '3.1' / '2.0' / '1.x' / 'unknown' по ключам [Interface]."""
+    kv = _iface_kv_from_conf(cfg_text)
+    if not kv:
+        return "unknown"
+    if any(kv.get(k) for k in _AWG31_KEYS):
+        return "3.1"
+    has_20 = bool(kv.get("s3") or kv.get("s4"))
+    if not has_20:
+        for i in range(1, 6):
+            if kv.get(f"i{i}"):
+                has_20 = True
+                break
+    if not has_20:
+        for h in ("h1", "h2", "h3", "h4"):
+            val = kv.get(h, "")
+            if "-" in val and _AWG_RANGE_RE.match(val.replace(" ", "")):
+                has_20 = True
+                break
+    if has_20:
+        return "2.0"
+    if any(kv.get(k) for k in ("jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4")):
+        return "1.x"
+    return "unknown"
+
+
+def _parse_awg_uint(val: str) -> int | None:
+    s = (val or "").strip()
+    if not s.isdigit():
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _validate_awg_obfuscation(cfg_text: str) -> str:
+    """Пустая строка = ок; иначе текст ошибки по ключам AWG 3.1/2.0."""
+    kv = _iface_kv_from_conf(cfg_text)
+    hp = kv.get("headerprotectionkey", "")
+    if hp:
+        for sk in ("s1", "s2", "s3", "s4"):
+            n = _parse_awg_uint(kv.get(sk, "0"))
+            if n is None or n < 12:
+                return (
+                    "HeaderProtectionKey требует S1–S4 не меньше 12 байт "
+                    f"(сейчас {sk.upper()}={kv.get(sk, '') or '0'})"
+                )
+    for key in _AWG31_ONOFF_KEYS:
+        val = kv.get(key)
+        if val and not _AWG_ONOFF_RE.match(val):
+            label = _AWG_KEY_DISPLAY.get(key, key)
+            return f"{label}: ожидается on или off, получено {val!r}"
+    for key in _AWG31_RANGE_KEYS:
+        val = kv.get(key)
+        if not val:
+            continue
+        compact = val.replace(" ", "")
+        label = _AWG_KEY_DISPLAY.get(key, key)
+        if not _AWG_RANGE_RE.match(compact):
+            return f"{label}: ожидается число или диапазон a-b, получено {val!r}"
+        if "-" in compact:
+            a, b = compact.split("-", 1)
+            try:
+                if int(a) > int(b):
+                    return f"{label}: левая граница диапазона больше правой ({val})"
+            except ValueError:
+                return f"{label}: некорректный диапазон {val!r}"
+    return ""
+
+
+def _awg_version_blob(cmd_out: str) -> str:
+    return (cmd_out or "").strip()
+
+
+def _parse_awg_semver(raw: str) -> tuple[int, int] | None:
+    m = re.search(r"(\d+)\.(\d+)", raw or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _semver_ge_31(ver: tuple[int, int] | None) -> bool:
+    if not ver:
+        return False
+    maj, minor = ver
+    return maj > 3 or (maj == 3 and minor >= 1)
+
+
+def _awg_tools_version() -> str:
+    if not shutil.which("awg"):
+        return ""
+    try:
+        p = subprocess.run(
+            ["awg", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except Exception:
+        return ""
+    return _awg_version_blob(p.stdout or p.stderr or "")
+
+
+def _awg_module_version() -> str:
+    sys_path = Path("/sys/module/amneziawg/version")
+    try:
+        if sys_path.is_file():
+            return sys_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if not shutil.which("modinfo"):
+        return ""
+    try:
+        p = subprocess.run(
+            ["modinfo", "-F", "version", "amneziawg"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except Exception:
+        return ""
+    return _awg_version_blob(p.stdout or "")
+
+
+def _stack_supports_awg31() -> bool:
+    return _semver_ge_31(_parse_awg_semver(_awg_tools_version())) and _semver_ge_31(
+        _parse_awg_semver(_awg_module_version())
+    )
+
+
+def _awg_stack_payload() -> dict:
+    tools = _awg_tools_version()
+    module = _awg_module_version()
+    return {
+        "tools_version": tools,
+        "module_version": module,
+        "supports_awg31": _stack_supports_awg31(),
+    }
+
+
 def _validate_tunnel_config(cfg_text: str) -> tuple[bool, str]:
     try:
         sanitized = _sanitize_tunnel_config(cfg_text)
@@ -436,6 +639,21 @@ def _validate_tunnel_config(cfg_text: str) -> tuple[bool, str]:
         )
         if p.returncode != 0:
             return False, f"invalid PrivateKey: {(p.stderr or p.stdout).strip()}"
+
+    obf_err = _validate_awg_obfuscation(sanitized)
+    if obf_err:
+        return False, obf_err
+    proto = _classify_awg_protocol(sanitized)
+    if proto == "3.1" and not _stack_supports_awg31():
+        tools = _awg_tools_version() or "нет"
+        module = _awg_module_version() or "нет"
+        return (
+            False,
+            "конфиг AmneziaWG 3.1 требует модуль и awg-tools ≥ 3.1 "
+            f"(сейчас tools={tools}, модуль={module}). "
+            "Обновите стек через bootstrap или обновление из панели; "
+            "конфиг 3.1 нельзя урезать до 2.0.",
+        )
     return True, ""
 
 
@@ -2128,12 +2346,19 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             ping_cfg = dict(cfg)
             ping_cfg[tid] = dict(cfg.get(tid, {}))
             ping_cfg[tid]["enabled"] = en
+            conf_text = ""
+            if conf_ok:
+                for pth in self._tunnel_conf_paths(ifname):
+                    if pth.exists():
+                        conf_text = _read_text(str(pth), "")
+                        break
             out["tunnels"][tid] = {
                 "id": tid,
                 "ifname": ifname,
                 "label": cfg.get(tid, {}).get("label") or tid,
                 "enabled": en,
                 "configured": conf_ok,
+                "protocol": _classify_awg_protocol(conf_text) if conf_ok else "unknown",
                 "link_up": self._tunnel_link_up(ifname),
                 "is_active": tid == active,
                 "toggle_locked": bool(pol.get("toggle_locked")),
@@ -2144,6 +2369,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             }
         out["failover_enabled"] = enabled_n >= 2
         out["health_watch_enabled"] = enabled_n >= 1
+        out["stack"] = _awg_stack_payload()
         h = cfg.get("health") if isinstance(cfg.get("health"), dict) else {}
         dh = self._default_tunnels_config().get("health", {})
         if not h.get("targets"):

@@ -521,7 +521,10 @@ function renderTunnelImportHelp(state, tunnelId, tunnelMeta = null) {
   const draft = tunnelDraft(state, tunnelId);
   if (draft.importMode) draft.importMode = "";
   if (t.configured && t.ifname) {
-    help.textContent = `Конфиг задан (${t.ifname}.conf)`;
+    const proto = tunnelProtocolLabel(t.protocol);
+    help.textContent = proto
+      ? `Конфиг задан (${t.ifname}.conf), ${proto}`
+      : `Конфиг задан (${t.ifname}.conf)`;
   } else {
     help.textContent = "Конфиг не задан.";
   }
@@ -614,9 +617,54 @@ async function saveTunnelSettings(state, options = {}) {
   return res;
 }
 
+function tunnelProtocolLabel(proto) {
+  const p = String(proto || "").trim();
+  if (p === "3.1") return "AWG 3.1";
+  if (p === "2.0") return "AWG 2.0";
+  if (p === "1.x") return "AWG 1.x";
+  return "";
+}
+
+function applyTunnelProtocolBadges(cfg) {
+  for (const tid of ["tunnel1", "tunnel2"]) {
+    const badge = document.querySelector(`.tunnel-proto-badge[data-tunnel-id="${tid}"]`);
+    if (!badge) continue;
+    const t = (cfg.tunnels && cfg.tunnels[tid]) || {};
+    const label = t.configured ? tunnelProtocolLabel(t.protocol) : "";
+    badge.classList.remove("is-31", "is-20");
+    if (!label) {
+      badge.hidden = true;
+      badge.textContent = "";
+      continue;
+    }
+    badge.hidden = false;
+    badge.textContent = label;
+    if (t.protocol === "3.1") badge.classList.add("is-31");
+    else if (t.protocol === "2.0") badge.classList.add("is-20");
+  }
+}
+
+function applyTunnelStackLine(cfg) {
+  const el = $("tunnelStackLine");
+  if (!el) return;
+  const stack = (cfg && cfg.stack) || {};
+  const tools = String(stack.tools_version || "").trim() || "—";
+  const module = String(stack.module_version || "").trim() || "—";
+  el.classList.remove("is-ok", "is-warn");
+  if (stack.supports_awg31) {
+    el.classList.add("is-ok");
+    el.textContent = `Стек AmneziaWG 3.1 · tools ${tools} · модуль ${module}`;
+  } else {
+    el.classList.add("is-warn");
+    el.textContent = `Стек AmneziaWG устарел (нужен ≥ 3.1, конфиги 3.1 не поднимутся) · tools ${tools} · модуль ${module}`;
+  }
+}
+
 function applyTunnelsConfigToForm(cfg) {
   applyTunnelToggles(cfg);
   applyTunnelDeleteButtons(cfg);
+  applyTunnelProtocolBadges(cfg);
+  applyTunnelStackLine(cfg);
   for (const tid of ["tunnel1", "tunnel2"]) {
     applyTunnelRestartButton(tid, (cfg.tunnels && cfg.tunnels[tid]) || {});
   }
@@ -822,6 +870,9 @@ async function refreshTunnelsState(state = null, options = {}) {
     if (!cfg) return;
     if (!options.skipFormApply) {
       applyTunnelsConfigToForm(cfg);
+    } else {
+      applyTunnelProtocolBadges(cfg);
+      applyTunnelStackLine(cfg);
     }
     const activeId = cfg.active || "tunnel1";
     let activeUp = false;

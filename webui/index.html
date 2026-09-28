@@ -209,12 +209,15 @@
               <p class="help tunnel-failover-hint" id="tunnelFailoverHint">
                 При включённых обоих туннелях трафик идёт через первый; при сбое первого — через второй (если второй доступен).
                 Проверка — ping по списку ниже.
+                Конфиг AmneziaWG 3.1 нельзя преобразовать в 2.0; конфиг 2.0 работает на стеке 3.1.
+                Failover двух туннелей разных версий допускается.
               </p>
+              <p class="help tunnel-stack-line" id="tunnelStackLine">Стек AmneziaWG: —</p>
 
               <div class="tunnel-dual-grid">
                 <div class="tunnel-panel" data-tunnel-id="tunnel1">
                   <div class="tunnel-panel-head">
-                    <div class="tunnel-panel-title">Туннель 1 <span class="tunnel-ifname">(awg-uplink)</span></div>
+                    <div class="tunnel-panel-title">Туннель 1 <span class="tunnel-ifname">(awg-uplink)</span> <span class="tunnel-proto-badge" data-tunnel-id="tunnel1" hidden></span></div>
                     <label class="toggle-switch iface-fw-toggle" title="Включить туннель 1">
                       <input type="checkbox" id="tunnel1Enabled" role="switch" checked />
                       <span class="toggle-switch-slider" aria-hidden="true"></span>
@@ -238,7 +241,7 @@
 
                 <div class="tunnel-panel" data-tunnel-id="tunnel2">
                   <div class="tunnel-panel-head">
-                    <div class="tunnel-panel-title">Туннель 2 <span class="tunnel-ifname">(awg-uplink-2)</span></div>
+                    <div class="tunnel-panel-title">Туннель 2 <span class="tunnel-ifname">(awg-uplink-2)</span> <span class="tunnel-proto-badge" data-tunnel-id="tunnel2" hidden></span></div>
                     <label class="toggle-switch iface-fw-toggle" title="Включить туннель 2">
                       <input type="checkbox" id="tunnel2Enabled" role="switch" />
                       <span class="toggle-switch-slider" aria-hidden="true"></span>
