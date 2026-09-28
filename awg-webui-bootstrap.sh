@@ -538,6 +538,23 @@ amneziawg_load_kmod() {
   modprobe amneziawg 2>/dev/null || true
 }
 
+# Обновление кладёт новый .ko на диск, но загруженный модуль остаётся старым, пока его не выгрузить.
+# Туннели после этого поднимает post_update_refresh_services.
+amneziawg_reload_kmod() {
+  log "перезагрузка модуля ядра amneziawg"
+  amneziawg_stop_tunnels_for_kmod
+  if lsmod 2>/dev/null | grep -q '^amneziawg[[:space:]]'; then
+    if ! rmmod amneziawg 2>/dev/null; then
+      log "warning: rmmod amneziawg не удался (модуль занят) — пробую modprobe -r"
+      modprobe -r amneziawg 2>/dev/null || log "warning: не удалось выгрузить amneziawg"
+    fi
+  fi
+  depmod -a 2>/dev/null || true
+  if ! modprobe amneziawg; then
+    log "warning: modprobe amneziawg не удался"
+  fi
+}
+
 amneziawg_git_sync_31() {
   local dest=$1 url=$2
   if [[ -d "$dest/.git" ]]; then
@@ -883,6 +900,7 @@ if [[ $UPDATE_FILES_ONLY -eq 1 ]]; then
     log "Ensuring ntfy (update-only)..."
     AWG_WEBUI_CFG_DIR="$CFG_DIR" AWG_NTFY_UPDATE_ONLY=1 bash /usr/local/sbin/awg-ntfy-install.sh || log "warning: awg-ntfy-install failed"
   fi
+  amneziawg_reload_kmod
   post_update_refresh_services
   if [[ "${AWG_WEBUI_RESTART_DEFER:-0}" == "1" ]]; then
     # Self-update: post-update уже выполнен; откладываем только restart webui (ответ API успеет уйти).
