@@ -609,9 +609,13 @@
             </div>
 
             <div class="help notify-apps-help">
-              <strong>Подключение:</strong> в ntfy укажите URL сервера как default server, затем topic (или QR на Android).
+              <strong>Подключение:</strong> в ntfy укажите URL сервера как Default Server, затем topic (или QR на Android).
+              На iOS Default Server должен совпадать с полем выше посимвольно, включая порт.
               <strong>WebSocket</strong> можно включить в настройках подписки — сервер поддерживает и WebSocket, и обычный режим (JSON stream).
               Самоподписанный сертификат — разрешите в настройках приложения вручную.
+              Мгновенный пуш на iOS — это сигнал через ntfy.sh; текст телефон забирает с этого шлюза.
+              Если на экране только «New message», телефон не достучался до шлюза (сеть или сертификат).
+              Если пуши пропали совсем — удалите подписку на topic и добавьте её снова.
             </div>
 
             <div class="notify-alerts-grid">

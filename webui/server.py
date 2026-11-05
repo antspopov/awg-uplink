@@ -1563,7 +1563,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 count=1,
                 flags=re.M,
             )
-            if n and new_text != text:
+            if n == 0:
+                return
+            # iOS не держит фон: без upstream сервер не будит APNS, пуш приходит через десятки минут.
+            if not re.search(r"(?m)^upstream-base-url:", new_text):
+                new_text = re.sub(
+                    r'(?m)^(base-url:\s*".*"\s*)$',
+                    '\\1\nupstream-base-url: "https://ntfy.sh"',
+                    new_text,
+                    count=1,
+                )
+            if new_text != text:
                 path.write_text(new_text, encoding="utf-8")
                 for unit in ("ntfy.service", "ntfy"):
                     rc, _, _ = _run(["systemctl", "restart", unit], timeout=15.0)
@@ -1581,7 +1591,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if cur != url:
             cfg["server_url"] = url
             self._store_notifications_config(cfg)
-            self._patch_ntfy_server_yml_base_url(url)
+        self._patch_ntfy_server_yml_base_url(url)
         return url
 
     def _ntfy_subscribe_deeplink(self, server_url: str, topic: str) -> str:

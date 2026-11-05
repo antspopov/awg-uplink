@@ -259,6 +259,8 @@ write_ntfy_server_yml() {
   cat >"$NTFY_CONF" <<EOF
 # Managed by awg-ntfy-install.sh (AWG Split Gate)
 base-url: "$server_url"
+# iOS: только poll_request (id сообщения) уходит на ntfy.sh → APNS. Текст остаётся на этом сервере.
+upstream-base-url: "https://ntfy.sh"
 listen-http: "$NTFY_LISTEN"
 behind-proxy: true
 proxy-forwarded-header: "X-Forwarded-For"
