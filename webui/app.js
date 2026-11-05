@@ -1362,6 +1362,60 @@ function renderMtprotoUsers(users, pendingToggles = {}) {
   }
 }
 
+let mtpWebUiBusy = false;
+let mtpWebUiTarget = false;
+let mtpWebUiMessage = "";
+let mtpWebUiToken = 0;
+
+function paintMtprotoWebControl(web, cfgOk) {
+  const info = web || {};
+  const row = document.getElementById("mtpWebRow");
+  const webToggle = document.getElementById("mtpWebToggle");
+  const webHelp = document.getElementById("mtpWebHelp");
+  const spinner = document.getElementById("mtpWebSpinner");
+  const outbound = document.getElementById("mtpOutboundMode");
+  const busy = mtpWebUiBusy || Boolean(info.busy);
+  const message = busy ? String(info.phase_message || mtpWebUiMessage || "Выполняется…") : "";
+  if (row) {
+    row.classList.toggle("is-busy", busy);
+    if (busy) row.setAttribute("aria-busy", "true");
+    else row.removeAttribute("aria-busy");
+  }
+  if (spinner) spinner.classList.toggle("hidden", !busy);
+  if (webToggle) {
+    if (busy) {
+      webToggle.checked = mtpWebUiBusy ? mtpWebUiTarget : Boolean(info.target_enabled);
+      webToggle.disabled = true;
+    } else {
+      webToggle.checked = Boolean(info.enabled);
+      webToggle.disabled = !cfgOk || !info.available;
+    }
+  }
+  if (outbound) outbound.disabled = !cfgOk || busy;
+  if (webHelp && !busy) {
+    webHelp.textContent = info.available
+      ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Телефонные ссылки tg:// остаются. Домен в ссылке — домен панели; его смена обнуляет уже выданные WEB-ссылки."
+      : String(info.unavailable_reason || "");
+  }
+  if (document.getElementById("mtpWebStatus")) {
+    if (busy) {
+      setStatusById("mtpWebStatus", "dot--warn", message);
+      const overlay = document.getElementById("busyOverlay");
+      if (overlay && !overlay.classList.contains("hidden") && message) setBusyOverlayText(message);
+    } else if (!info.available) {
+      setStatusById("mtpWebStatus", "dot--warn", "недоступен");
+    } else if (info.phase === "failed" && info.phase_message) {
+      setStatusById("mtpWebStatus", "dot--bad", info.phase_message);
+    } else if (info.enabled && info.relay_active) {
+      setStatusById("mtpWebStatus", "dot--ok", `включён · ${info.domain || ""}`.trim());
+    } else if (info.enabled) {
+      setStatusById("mtpWebStatus", "dot--bad", "включён, релей не активен");
+    } else {
+      setStatusById("mtpWebStatus", "dot--muted", "выключен");
+    }
+  }
+}
+
 async function refreshMtprotoState(state) {
   try {
     const s = await fetchJson("/api/mtproto/state");
@@ -1438,29 +1492,7 @@ async function refreshMtprotoState(state) {
       setStatusById("mtprotoUsersStatus", "dot--ok", `загружено — ${ruUsersCount(n)}`);
     }
 
-    const web = s.web || {};
-    const webToggle = $("mtpWebToggle");
-    const webHelp = $("mtpWebHelp");
-    if (webToggle) {
-      webToggle.checked = Boolean(web.enabled);
-      webToggle.disabled = !cfgOk || !web.available;
-    }
-    if (webHelp) {
-      webHelp.textContent = web.available
-        ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Телефонные ссылки tg:// остаются. Домен в ссылке — домен панели; его смена обнуляет уже выданные WEB-ссылки."
-        : String(web.unavailable_reason || "");
-    }
-    if ($("mtpWebStatus")) {
-      if (!web.available) {
-        setStatusById("mtpWebStatus", "dot--warn", "недоступен");
-      } else if (web.enabled && web.relay_active) {
-        setStatusById("mtpWebStatus", "dot--ok", `включён · ${web.domain || ""}`);
-      } else if (web.enabled) {
-        setStatusById("mtpWebStatus", "dot--bad", "включён, релей не активен");
-      } else {
-        setStatusById("mtpWebStatus", "dot--muted", "выключен");
-      }
-    }
+    paintMtprotoWebControl(s.web || {}, cfgOk);
 
     setStatusById("mtpConfigStatus", s.config_exists ? "dot--ok" : "dot--warn", s.config_exists ? "загружен" : "не найден");
     const svc = s.service || {};
@@ -2062,16 +2094,57 @@ function initMtprotoPanel(state) {
           return;
         }
       }
-      webToggle.disabled = true;
+      const token = ++mtpWebUiToken;
+      mtpWebUiBusy = true;
+      mtpWebUiTarget = enabled;
+      mtpWebUiMessage = enabled ? "Включаем WEB-прокси…" : "Выключаем WEB-прокси…";
+      paintMtprotoWebControl(
+        { available: true, enabled, busy: true, phase_message: mtpWebUiMessage, target_enabled: enabled },
+        true
+      );
+      let stopPoll = false;
+      const poll = (async () => {
+        while (!stopPoll && mtpWebUiToken === token) {
+          await sleepMs(800);
+          if (stopPoll || mtpWebUiToken !== token) return;
+          try {
+            const res = await fetch(`${basePath()}api/mtproto/web/status`, {
+              credentials: "include",
+              cache: "no-store",
+            });
+            if (!res.ok || stopPoll || mtpWebUiToken !== token) continue;
+            const st = await res.json();
+            if (!st || !st.running || !st.message || stopPoll || mtpWebUiToken !== token || !mtpWebUiBusy) continue;
+            mtpWebUiMessage = String(st.message);
+            paintMtprotoWebControl(
+              {
+                available: true,
+                busy: true,
+                phase_message: mtpWebUiMessage,
+                target_enabled: Boolean(st.target_enabled),
+                enabled: Boolean(st.target_enabled),
+              },
+              true
+            );
+          } catch (_) {}
+        }
+      })();
       try {
-        await withBusyOverlay(enabled ? "Включаем WEB-прокси…" : "Выключаем WEB-прокси…", async () => {
+        await withBusyOverlay(mtpWebUiMessage, async () => {
           await postJson("/api/mtproto/web", { enabled });
         });
         toast(enabled ? "WEB-прокси включён." : "WEB-прокси выключен.", "ok", 2600);
       } catch (e) {
         toast(String(e?.message || "Не удалось переключить WEB-прокси").replace(/^"|"$/g, ""), "error", 5200);
+      } finally {
+        stopPoll = true;
+        if (mtpWebUiToken === token) {
+          mtpWebUiBusy = false;
+          mtpWebUiMessage = "";
+        }
       }
       await refreshMtprotoState(state);
+      void poll;
     });
   }
 

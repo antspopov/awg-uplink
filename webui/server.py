@@ -1197,6 +1197,37 @@ _AMNEZIA_STACK_CACHE_LOCK = threading.Lock()
 _MTPROTO_WEB_LOCK = threading.RLock()
 _MTPROTO_WEB_MASK_PORT = 8443
 _MTPROTO_WEB_MIN_VERSION = "1.11.0"
+_MTPROTO_WEB_STATUS_LOCK = threading.Lock()
+_MTPROTO_WEB_STATUS: dict = {
+    "running": False,
+    "target_enabled": False,
+    "phase": "",
+    "message": "",
+    "ok": None,
+    "error": "",
+}
+
+
+def _mtproto_web_status_update(**kwargs) -> None:
+    with _MTPROTO_WEB_STATUS_LOCK:
+        _MTPROTO_WEB_STATUS.update(kwargs)
+
+
+def _mtproto_web_status_snapshot() -> dict:
+    with _MTPROTO_WEB_STATUS_LOCK:
+        return dict(_MTPROTO_WEB_STATUS)
+
+
+def _mtproto_web_status_fail(message: str) -> None:
+    text = (message or "не удалось переключить WEB-прокси").strip()
+    short = text.splitlines()[0][:180]
+    _mtproto_web_status_update(
+        running=False,
+        phase="failed",
+        message=short,
+        ok=False,
+        error=text,
+    )
 _AMNEZIA_STACK_CACHE_MONO = 0.0
 _AMNEZIA_STACK_CACHE_VAL = False
 _AMNEZIA_STACK_CACHE_TTL = 55.0
@@ -3833,6 +3864,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         return "setup web" in (text or "").lower()
 
     def _ensure_mtbuddy_web_support(self) -> None:
+        _mtproto_web_status_update(phase="check", message="Проверяем версию mtbuddy…")
         _rc, ver_text = self._run_mtbuddy(["--version"], 20)
         match = re.search(r"(\d+\.\d+\.\d+)", ver_text or "")
         version = match.group(1) if match else ""
@@ -3840,6 +3872,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return
         if self._mtbuddy_supports_web():
             return
+        _mtproto_web_status_update(
+            phase="update",
+            message="Обновляем mtbuddy. Это может занять несколько минут…",
+        )
         rc, out = self._run_mtbuddy(["update"], 150)
         if rc != 0:
             raise RuntimeError(out or "не удалось обновить mtbuddy до версии с WEB-прокси")
@@ -3869,87 +3905,113 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         cfg_text = _read_text(cfg_path, "")
         if not cfg_text.strip():
             raise RuntimeError("MTProto не установлен")
-        with _MTPROTO_WEB_LOCK:
-            if not enabled:
-                rc, out = self._run_mtbuddy(["setup", "web", "--remove"], 120)
-                self._restore_mtproto_mask_port(cfg_path)
-                if rc != 0 and _mtproto_web_is_on(_read_text(cfg_path, "")):
-                    raise RuntimeError(out or "не удалось выключить WEB-прокси")
-                return {"ok": True, "enabled": False}
+        _mtproto_web_status_update(
+            running=True,
+            target_enabled=bool(enabled),
+            phase="stop" if not enabled else "check",
+            message="Выключаем WEB-прокси…" if not enabled else "Включаем WEB-прокси…",
+            ok=None,
+            error="",
+        )
+        try:
+            with _MTPROTO_WEB_LOCK:
+                result = self._op_mtproto_web_set_locked(enabled, cfg_path, cfg_text)
+        except Exception as ex:
+            _mtproto_web_status_fail(str(ex))
+            raise
+        _mtproto_web_status_update(running=False, phase="", message="", ok=True, error="")
+        return result
 
-            available, reason, host = _mtproto_web_availability()
-            if not available or not host:
-                raise RuntimeError(reason or "WEB-прокси недоступен")
-            raw_domain = _read_webui_env_value("AWG_UI_DOMAIN", "").strip()
-            cert, key = _mtproto_letsencrypt_pair(raw_domain)
-            if not cert or not key:
-                raise RuntimeError("Сертификат Let's Encrypt для домена панели не найден.")
-            current = str(_mtproto_web_section(cfg_text).get("domain") or "").strip().strip('"')
-            current_host = _mtproto_web_host(current)
-            if current_host and current_host != host:
-                raise RuntimeError(
-                    f"WEB-прокси уже привязан к {current}. Смена домена обнуляет выданные ссылки. "
-                    "Сначала выключите WEB-прокси."
-                )
-            domain = current if current_host == host and current else host
-            self._ensure_mtbuddy_web_support()
-            staged = _upsert_toml_section_values(
-                _read_text(cfg_path, ""),
+    def _op_mtproto_web_set_locked(self, enabled: bool, cfg_path: str, cfg_text: str) -> dict:
+        if not enabled:
+            _mtproto_web_status_update(phase="stop", message="Останавливаем WEB-прокси…")
+            rc, out = self._run_mtbuddy(["setup", "web", "--remove"], 120)
+            _mtproto_web_status_update(phase="restore", message="Возвращаем обычный порт маскировки…")
+            self._restore_mtproto_mask_port(cfg_path)
+            if rc != 0 and _mtproto_web_is_on(_read_text(cfg_path, "")):
+                raise RuntimeError(out or "не удалось выключить WEB-прокси")
+            return {"ok": True, "enabled": False}
+
+        _mtproto_web_status_update(phase="check", message="Проверяем сертификат и домен…")
+        available, reason, host = _mtproto_web_availability()
+        if not available or not host:
+            raise RuntimeError(reason or "WEB-прокси недоступен")
+        raw_domain = _read_webui_env_value("AWG_UI_DOMAIN", "").strip()
+        cert, key = _mtproto_letsencrypt_pair(raw_domain)
+        if not cert or not key:
+            raise RuntimeError("Сертификат Let's Encrypt для домена панели не найден.")
+        current = str(_mtproto_web_section(cfg_text).get("domain") or "").strip().strip('"')
+        current_host = _mtproto_web_host(current)
+        if current_host and current_host != host:
+            raise RuntimeError(
+                f"WEB-прокси уже привязан к {current}. Смена домена обнуляет выданные ссылки. "
+                "Сначала выключите WEB-прокси."
+            )
+        domain = current if current_host == host and current else host
+        self._ensure_mtbuddy_web_support()
+        _mtproto_web_status_update(phase="prepare", message="Записываем настройки WEB-прокси…")
+        staged = _upsert_toml_section_values(
+            _read_text(cfg_path, ""),
+            "web",
+            {
+                "enabled": "true",
+                "only": "false",
+                "domain": f'"{domain}"',
+                "mode": '"mask"',
+            },
+        )
+        staged = _upsert_mtproto_censorship_cfg(staged, "", _MTPROTO_WEB_MASK_PORT)
+        self._write_mtproto_cfg(cfg_path, staged)
+        _mtproto_web_status_update(phase="masking", message="Настраиваем маскировку nginx…")
+        rc, out = self._run_mtbuddy(["setup", "masking"], 150)
+        masking_site = Path("/etc/nginx/sites-enabled/mtproto-masking")
+        if rc != 0 or not masking_site.exists():
+            _mtproto_web_status_update(phase="rollback", message="Не получилось. Откатываем изменения…")
+            self._run_mtbuddy(["setup", "web", "--remove"], 60)
+            try:
+                self._restore_mtproto_mask_port(cfg_path)
+            except Exception:
+                pass
+            raise RuntimeError(out or "mtbuddy setup masking не выполнен")
+        _mtproto_web_status_update(phase="relay", message="Поднимаем реле WEB-прокси…")
+        rc, out = self._run_mtbuddy(
+            [
+                "setup",
                 "web",
-                {
-                    "enabled": "true",
-                    "only": "false",
-                    "domain": f'"{domain}"',
-                    "mode": '"mask"',
-                },
-            )
-            staged = _upsert_mtproto_censorship_cfg(staged, "", _MTPROTO_WEB_MASK_PORT)
-            self._write_mtproto_cfg(cfg_path, staged)
-            rc, out = self._run_mtbuddy(["setup", "masking"], 150)
-            masking_site = Path("/etc/nginx/sites-enabled/mtproto-masking")
-            if rc != 0 or not masking_site.exists():
-                self._run_mtbuddy(["setup", "web", "--remove"], 60)
-                try:
-                    self._restore_mtproto_mask_port(cfg_path)
-                except Exception:
-                    pass
-                raise RuntimeError(out or "mtbuddy setup masking не выполнен")
-            rc, out = self._run_mtbuddy(
-                [
-                    "setup",
-                    "web",
-                    "--domain",
-                    domain,
-                    "--mode",
-                    "mask",
-                    "--no-only",
-                    "--cert",
-                    cert,
-                    "--key",
-                    key,
-                ],
-                180,
-            )
-            relay_unit = Path("/etc/systemd/system/mtproto-web-relay.service")
-            web_site = Path("/etc/nginx/sites-enabled/mtproto-web")
-            if (
-                rc != 0
-                or not relay_unit.is_file()
-                or not web_site.exists()
-                or not _mtproto_web_is_on(_read_text(cfg_path, ""))
-            ):
-                self._run_mtbuddy(["setup", "web", "--remove"], 60)
-                try:
-                    self._restore_mtproto_mask_port(cfg_path)
-                except Exception:
-                    pass
-                raise RuntimeError(out or "mtbuddy setup web не выполнен")
-            if not (
-                self._service_is_active("mtproto-web-relay.service")
-                or self._service_is_active("mtproto-web-relay")
-            ):
-                _run(["systemctl", "enable", "--now", "mtproto-web-relay.service"], timeout=30.0)
-            return {"ok": True, "enabled": True, "domain": domain}
+                "--domain",
+                domain,
+                "--mode",
+                "mask",
+                "--no-only",
+                "--cert",
+                cert,
+                "--key",
+                key,
+            ],
+            180,
+        )
+        relay_unit = Path("/etc/systemd/system/mtproto-web-relay.service")
+        web_site = Path("/etc/nginx/sites-enabled/mtproto-web")
+        if (
+            rc != 0
+            or not relay_unit.is_file()
+            or not web_site.exists()
+            or not _mtproto_web_is_on(_read_text(cfg_path, ""))
+        ):
+            _mtproto_web_status_update(phase="rollback", message="Не получилось. Откатываем изменения…")
+            self._run_mtbuddy(["setup", "web", "--remove"], 60)
+            try:
+                self._restore_mtproto_mask_port(cfg_path)
+            except Exception:
+                pass
+            raise RuntimeError(out or "mtbuddy setup web не выполнен")
+        if not (
+            self._service_is_active("mtproto-web-relay.service")
+            or self._service_is_active("mtproto-web-relay")
+        ):
+            _mtproto_web_status_update(phase="start", message="Запускаем сервис релея…")
+            _run(["systemctl", "enable", "--now", "mtproto-web-relay.service"], timeout=30.0)
+        return {"ok": True, "enabled": True, "domain": domain}
 
     def _unit_state(self, unit_name: str) -> dict:
         name = str(unit_name or "").strip()
@@ -4206,6 +4268,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         pub_derived = _mtproto_public_ip_from_iface(iface_rt)
         mid_raw = self._derive_middle_proxy_nat_ip(iface_rt, ui_mode)
         mid_derived = mid_raw if _ipv4_literal_ok(mid_raw) else ""
+        web_op = _mtproto_web_status_snapshot()
 
         return self._send_json(
             200,
@@ -4270,6 +4333,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "only": bool(web_sec.get("only")),
                     "relay_active": self._service_is_active("mtproto-web-relay.service")
                     or self._service_is_active("mtproto-web-relay"),
+                    "busy": bool(web_op.get("running")),
+                    "phase": str(web_op.get("phase") or ""),
+                    "phase_message": str(web_op.get("message") or ""),
+                    "target_enabled": bool(web_op.get("target_enabled")),
                 },
             },
         )
@@ -4387,6 +4454,11 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             if self._auth_enabled and not self._session_user():
                 return self._send_text(401, "Unauthorized")
             return self._api_mtproto_state()
+
+        if sp == "/api/mtproto/web/status":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            return self._send_json(200, _mtproto_web_status_snapshot())
 
         if sp == "/api/mtproto/install/status":
             if self._auth_enabled and not self._session_user():
