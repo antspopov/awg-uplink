@@ -201,8 +201,15 @@ if [[ -f /etc/ntfy/server.yml ]] && grep -q 'Managed by awg-ntfy-install.sh' /et
 fi
 rm -f -- /etc/apt/sources.list.d/ntfy.list /etc/apt/keyrings/ntfy.gpg
 
-log "nginx: сайт Web UI и самоподписанные сертификаты"
+log "nginx: сайт Web UI, WEB-прокси MTProto и самоподписанные сертификаты"
 rm -f -- "$NGINX_SITE_LINK" "$NGINX_SITE_PATH"
+rm -f -- \
+	/etc/nginx/sites-enabled/mtproto-web \
+	/etc/nginx/sites-available/mtproto-web \
+	/etc/nginx/sites-enabled/mtproto-web-acme \
+	/etc/nginx/sites-available/mtproto-web-acme \
+	/etc/nginx/sites-enabled/mtproto-masking \
+	/etc/nginx/sites-available/mtproto-masking
 rm -rf -- "$SELF_SIGNED_CERT_DIR"
 if [[ ! -e /etc/nginx/sites-enabled/default ]] && [[ -f /etc/nginx/sites-available/default ]]; then
 	ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default

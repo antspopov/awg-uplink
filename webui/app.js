@@ -1326,6 +1326,7 @@ function renderMtprotoUsers(users, pendingToggles = {}) {
     const row = document.createElement("div");
     row.className = "mtp-user-item";
     const link = u.link || "";
+    const linkWeb = u.link_web || "";
     const pending = pendingToggles && pendingToggles[u.username || ""];
     const baseEnabled = Boolean(u.enabled);
     const enabled = pending ? Boolean(pending.enabled) : baseEnabled;
@@ -1339,16 +1340,22 @@ function renderMtprotoUsers(users, pendingToggles = {}) {
         <div class="mtp-user-meta">secret: ${shortSecret(u.secret || "")}</div>
       </div>
       <div class="mtp-user-sessions">${sessions}</div>
-      <div class="mtp-user-link" title="${link}">${link || "tg://—"}</div>
+      <div class="mtp-user-link" title="${link}">
+        <div>${link || "tg://—"}</div>
+        ${linkWeb ? `<div class="mtp-user-link-web" title="${linkWeb}">${linkWeb}</div>` : ""}
+      </div>
       <div class="mtp-user-actions">
         <button class="mini-btn user-action" data-copy-link="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy tg://</button>
         <button class="mini-btn user-action" data-copy-tme="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy t.me</button>
+        ${linkWeb ? `<button class="mini-btn user-action" data-copy-web="${u.username || ""}" type="button">Copy WEB</button>` : ""}
         <button class="mini-btn user-action" data-edit-user="${u.username || ""}" type="button">✎</button>
         <button class="mini-btn mini-btn--danger user-action" data-del-user="${u.username || ""}" type="button" ${lastActiveLock ? "disabled" : ""} title="${lastActiveLock ? "Нельзя удалить последнего активного пользователя" : "Удалить"}">✕</button>
       </div>
     `;
     row.dataset.link = link;
     row.dataset.linkTme = linkTme;
+    row.dataset.linkWeb = linkWeb;
+    row.dataset.linkWebTme = u.link_web_tme || "";
     row.dataset.secret = u.secret || "";
     row.dataset.sessions = String(sessions);
     body.appendChild(row);
@@ -1429,6 +1436,30 @@ async function refreshMtprotoState(state) {
       setStatusById("mtprotoUsersStatus", "dot--muted", "в конфиге нет пользователей");
     } else {
       setStatusById("mtprotoUsersStatus", "dot--ok", `загружено — ${ruUsersCount(n)}`);
+    }
+
+    const web = s.web || {};
+    const webToggle = $("mtpWebToggle");
+    const webHelp = $("mtpWebHelp");
+    if (webToggle) {
+      webToggle.checked = Boolean(web.enabled);
+      webToggle.disabled = !cfgOk || !web.available;
+    }
+    if (webHelp) {
+      webHelp.textContent = web.available
+        ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Телефонные ссылки tg:// остаются. Домен в ссылке — домен панели; его смена обнуляет уже выданные WEB-ссылки."
+        : String(web.unavailable_reason || "");
+    }
+    if ($("mtpWebStatus")) {
+      if (!web.available) {
+        setStatusById("mtpWebStatus", "dot--warn", "недоступен");
+      } else if (web.enabled && web.relay_active) {
+        setStatusById("mtpWebStatus", "dot--ok", `включён · ${web.domain || ""}`);
+      } else if (web.enabled) {
+        setStatusById("mtpWebStatus", "dot--bad", "включён, релей не активен");
+      } else {
+        setStatusById("mtpWebStatus", "dot--muted", "выключен");
+      }
     }
 
     setStatusById("mtpConfigStatus", s.config_exists ? "dot--ok" : "dot--warn", s.config_exists ? "загружен" : "не найден");
@@ -2018,6 +2049,32 @@ function initMtprotoPanel(state) {
     $("mtpConfigModalOverlay").classList.remove("hidden");
   });
 
+  const webToggle = $("mtpWebToggle");
+  if (webToggle) {
+    webToggle.addEventListener("change", async () => {
+      const enabled = Boolean(webToggle.checked);
+      if (!enabled) {
+        const ok = window.confirm(
+          "Выключить WEB-прокси? Уже выданные ссылки tg://webproxy перестанут работать. Ссылки tg:// для телефонов останутся."
+        );
+        if (!ok) {
+          webToggle.checked = true;
+          return;
+        }
+      }
+      webToggle.disabled = true;
+      try {
+        await withBusyOverlay(enabled ? "Включаем WEB-прокси…" : "Выключаем WEB-прокси…", async () => {
+          await postJson("/api/mtproto/web", { enabled });
+        });
+        toast(enabled ? "WEB-прокси включён." : "WEB-прокси выключен.", "ok", 2600);
+      } catch (e) {
+        toast(String(e?.message || "Не удалось переключить WEB-прокси").replace(/^"|"$/g, ""), "error", 5200);
+      }
+      await refreshMtprotoState(state);
+    });
+  }
+
   const outboundSel = $("mtpOutboundMode");
   if (outboundSel) {
     outboundSel.addEventListener("change", async () => {
@@ -2095,6 +2152,7 @@ function initMtprotoPanel(state) {
     const toggleUser = t.getAttribute("data-toggle-user");
     const copyUser = t.getAttribute("data-copy-link");
     const copyTmeUser = t.getAttribute("data-copy-tme");
+    const copyWebUser = t.getAttribute("data-copy-web");
     const editUser = t.getAttribute("data-edit-user");
     if (uname) {
       const ok = await openDeleteConfirm(uname);
@@ -2152,6 +2210,14 @@ function initMtprotoPanel(state) {
         const ok = await copyText(linkTme || tgToTme(link));
         toast(ok ? "Ссылка t.me скопирована." : "Не удалось скопировать ссылку.", ok ? "ok" : "error");
       }
+      return;
+    }
+    if (copyWebUser) {
+      const card = t.closest(".mtp-user-item");
+      const linkWeb = card ? card.dataset.linkWeb || "" : "";
+      if (!linkWeb) return;
+      const ok = await copyText(linkWeb);
+      toast(ok ? "Ссылка tg://webproxy скопирована." : "Не удалось скопировать ссылку.", ok ? "ok" : "error");
       return;
     }
     if (editUser) {

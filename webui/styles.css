@@ -824,6 +824,14 @@ body::before {
   margin-top: 8px;
 }
 
+.mtp-web-row {
+  margin-top: 14px;
+}
+
+.mtp-web-status {
+  margin-top: 8px;
+}
+
 .geo-routing-settings-card {
   margin-top: 18px;
 }
@@ -1631,14 +1639,23 @@ select:disabled option {
 .mtp-user-link {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.82);
-  white-space: nowrap;
+  min-width: 0;
+}
+
+.mtp-user-link > div {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mtp-user-link-web {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.62);
 }
 
 .mtp-user-actions {
   display: grid;
-  grid-template-columns: repeat(4, max-content);
+  grid-template-columns: repeat(5, max-content);
   gap: 6px;
   width: max-content;
   max-width: 100%;
@@ -2091,7 +2108,7 @@ textarea {
 /* Final authoritative layout for MTProto user action buttons */
 .mtp-user-actions {
   display: grid !important;
-  grid-template-columns: repeat(4, max-content) !important;
+  grid-template-columns: repeat(5, max-content) !important;
   gap: 6px !important;
   width: max-content !important;
   max-width: 100% !important;

@@ -960,6 +960,97 @@ def _build_mtproto_proxy_links(
     return f"tg://proxy?{q}", f"https://t.me/proxy?{q}"
 
 
+def _mtproto_web_host(raw: str) -> str:
+    """Имя, которое Telegram Desktop примет в tg://webproxy. IP и одно слово — нет."""
+    host = str(raw or "").strip().strip(".").lower()
+    if not host or _ipv4_literal_ok(host) or ":" in host or "." not in host:
+        return ""
+    if not re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+        host,
+    ):
+        return ""
+    return host
+
+
+def _build_mtproto_web_links(host: str, user_secret: str) -> tuple[str, str]:
+    """Как mtbuddy links: secret с префиксом dd, порт 443 в ссылку не входит."""
+    secret = str(user_secret or "").strip().strip('"').lower()
+    host = _mtproto_web_host(host)
+    if not host or not re.fullmatch(r"[0-9a-f]{32}", secret):
+        return "", ""
+    q = f"server={quote(host, safe='')}&secret=dd{secret}"
+    return f"tg://webproxy?{q}", f"https://t.me/webproxy?{q}"
+
+
+def _mtproto_web_section(cfg_text: str) -> dict:
+    parsed = _parse_simple_toml(cfg_text) if str(cfg_text or "").strip() else {}
+    web = parsed.get("web")
+    return web if isinstance(web, dict) else {}
+
+
+def _mtproto_web_is_on(cfg_text: str) -> bool:
+    return bool(_mtproto_web_section(cfg_text).get("enabled"))
+
+
+def _mtproto_letsencrypt_pair(domain: str) -> tuple[str, str]:
+    raw = str(domain or "").strip().strip(".")
+    host = _mtproto_web_host(raw)
+    names: list[str] = []
+    for item in (raw, host):
+        if item and item not in names:
+            names.append(item)
+    for name in names:
+        cert = Path(f"/etc/letsencrypt/live/{name}/fullchain.pem")
+        key = Path(f"/etc/letsencrypt/live/{name}/privkey.pem")
+        if cert.is_file() and key.is_file():
+            return str(cert), str(key)
+    return "", ""
+
+
+def _mtproto_web_availability() -> tuple[bool, str, str]:
+    """(можно включить, причина отказа, домен панели)."""
+    raw_domain = _read_webui_env_value("AWG_UI_DOMAIN", "").strip()
+    host = _mtproto_web_host(raw_domain)
+    if _webui_tls_self_signed():
+        return (
+            False,
+            "Нужен сертификат Let's Encrypt: WebView Telegram не принимает самоподписанный сертификат.",
+            host,
+        )
+    if not host:
+        return False, "WEB-прокси требует доменное имя с точкой. IP-адрес клиент отвергает.", ""
+    cert, key = _mtproto_letsencrypt_pair(raw_domain)
+    if not cert or not key:
+        return False, "Сертификат Let's Encrypt для домена панели не найден.", host
+    return True, "", host
+
+
+def _upsert_toml_section_values(cfg_text: str, section_name: str, values: dict[str, str]) -> str:
+    """Подставить уже отформатированные значения в секцию TOML, остальные строки сохранить."""
+    text = cfg_text or ""
+    header = f"[{section_name}]"
+    if header not in text:
+        text = text.rstrip() + ("\n" if text.strip() else "") + f"\n{header}\n"
+    start = text.index(header)
+    rest = text[start:]
+    m = re.search(r"\n\[[^\n]+\]", rest[1:])
+    end = start + (m.start() + 1 if m else len(rest))
+    section = text[start:end]
+
+    def replace_or_add(section_text: str, key: str, value: str) -> str:
+        pattern = re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+        if pattern.search(section_text):
+            return pattern.sub(lambda match: match.group(1) + value, section_text)
+        if not section_text.endswith("\n"):
+            section_text += "\n"
+        return section_text + f"{key} = {value}\n"
+
+    for key, value in values.items():
+        section = replace_or_add(section, key, value)
+    return text[:start] + section + text[end:]
+
+
 def _read_webui_env_value(key: str, default: str = "") -> str:
     env_path = Path(os.environ.get("AWG_WEBUI_CFG_DIR", "/etc/awg-uplink-webui")) / "webui.env"
     if not env_path.is_file():
@@ -1103,6 +1194,9 @@ def _upsert_mtproto_censorship_cfg(cfg_text: str, domain: str, mask_port: int) -
 
 
 _AMNEZIA_STACK_CACHE_LOCK = threading.Lock()
+_MTPROTO_WEB_LOCK = threading.RLock()
+_MTPROTO_WEB_MASK_PORT = 8443
+_MTPROTO_WEB_MIN_VERSION = "1.11.0"
 _AMNEZIA_STACK_CACHE_MONO = 0.0
 _AMNEZIA_STACK_CACHE_VAL = False
 _AMNEZIA_STACK_CACHE_TTL = 55.0
@@ -3588,6 +3682,20 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         apply_upstream: bool = True,
         restart_mtproto: bool = True,
     ) -> dict:
+        with _MTPROTO_WEB_LOCK:
+            return self._sync_mtproto_derived_config_impl(
+                persist_outbound_mode=persist_outbound_mode,
+                apply_upstream=apply_upstream,
+                restart_mtproto=restart_mtproto,
+            )
+
+    def _sync_mtproto_derived_config_impl(
+        self,
+        *,
+        persist_outbound_mode: str | None = None,
+        apply_upstream: bool = True,
+        restart_mtproto: bool = True,
+    ) -> dict:
         cfg_path = self._mtproto_config_path()
         cfg_text = _read_text(cfg_path, "")
         if not cfg_text.strip():
@@ -3619,10 +3727,15 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         env_domain = str(os.environ.get("AWG_UI_DOMAIN", "") or "").strip()
         domain_for_mask = env_domain or str(censor_now.get("tls_domain", "") or "").strip()
         env_mask_port = str(os.environ.get("AWG_UI_MASK_PORT", "") or "").strip()
-        try:
-            mask_port_for_mask = int(env_mask_port) if env_mask_port else int(censor_now.get("mask_port", 5000) or 5000)
-        except Exception:
-            mask_port_for_mask = 5000
+        # WEB-режим mtbuddy принимает только локальный masking на 8443. Пока он включён,
+        # панель на 5000 остаётся сайтом управления и не должна перехватывать mask_port.
+        if _mtproto_web_is_on(new_text):
+            mask_port_for_mask = _MTPROTO_WEB_MASK_PORT
+        else:
+            try:
+                mask_port_for_mask = int(env_mask_port) if env_mask_port else int(censor_now.get("mask_port", 5000) or 5000)
+            except Exception:
+                mask_port_for_mask = 5000
         new_text = _upsert_mtproto_censorship_cfg(new_text, domain_for_mask, mask_port_for_mask)
         pub = _mtproto_public_ip_from_iface(iface)
         mid = self._derive_middle_proxy_nat_ip(iface, mode)
@@ -3692,6 +3805,152 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         except Exception as ex:
             return str(ex)
 
+    def _run_mtbuddy(self, args: list[str], timeout: float) -> tuple[int, str]:
+        if not shutil.which("mtbuddy"):
+            return 127, "mtbuddy не установлен. Сначала установите MTProto."
+        env = {
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "TERM": "xterm",
+        }
+        try:
+            proc = subprocess.run(
+                ["mtbuddy", *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, "mtbuddy не ответил вовремя"
+        text = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return proc.returncode, "\n".join(lines[-12:])
+
+    def _mtbuddy_supports_web(self) -> bool:
+        _rc, text = self._run_mtbuddy(["--help"], 20)
+        return "setup web" in (text or "").lower()
+
+    def _ensure_mtbuddy_web_support(self) -> None:
+        _rc, ver_text = self._run_mtbuddy(["--version"], 20)
+        match = re.search(r"(\d+\.\d+\.\d+)", ver_text or "")
+        version = match.group(1) if match else ""
+        if version and not _semver_gt(_MTPROTO_WEB_MIN_VERSION, version):
+            return
+        if self._mtbuddy_supports_web():
+            return
+        rc, out = self._run_mtbuddy(["update"], 150)
+        if rc != 0:
+            raise RuntimeError(out or "не удалось обновить mtbuddy до версии с WEB-прокси")
+        if not self._mtbuddy_supports_web():
+            raise RuntimeError("после обновления mtbuddy команда setup web недоступна")
+
+    def _write_mtproto_cfg(self, cfg_path: str, text: str) -> None:
+        _write_text(cfg_path, text if text.endswith("\n") else text + "\n")
+        _run(["chown", "mtproto:mtproto", cfg_path], timeout=2.0)
+
+    def _restore_mtproto_mask_port(self, cfg_path: str) -> None:
+        text = _read_text(cfg_path, "")
+        if not text.strip():
+            return
+        env_mask = str(os.environ.get("AWG_UI_MASK_PORT", "") or "").strip()
+        try:
+            port = int(env_mask) if env_mask else 5000
+        except Exception:
+            port = 5000
+        text = _upsert_toml_section_values(text, "web", {"enabled": "false", "only": "false"})
+        text = _upsert_mtproto_censorship_cfg(text, "", port)
+        self._write_mtproto_cfg(cfg_path, text)
+        _run(["systemctl", "restart", self._mtproto_service_name()], timeout=30.0)
+
+    def _op_mtproto_web_set(self, enabled: bool) -> dict:
+        cfg_path = self._mtproto_config_path()
+        cfg_text = _read_text(cfg_path, "")
+        if not cfg_text.strip():
+            raise RuntimeError("MTProto не установлен")
+        with _MTPROTO_WEB_LOCK:
+            if not enabled:
+                rc, out = self._run_mtbuddy(["setup", "web", "--remove"], 120)
+                self._restore_mtproto_mask_port(cfg_path)
+                if rc != 0 and _mtproto_web_is_on(_read_text(cfg_path, "")):
+                    raise RuntimeError(out or "не удалось выключить WEB-прокси")
+                return {"ok": True, "enabled": False}
+
+            available, reason, host = _mtproto_web_availability()
+            if not available or not host:
+                raise RuntimeError(reason or "WEB-прокси недоступен")
+            raw_domain = _read_webui_env_value("AWG_UI_DOMAIN", "").strip()
+            cert, key = _mtproto_letsencrypt_pair(raw_domain)
+            if not cert or not key:
+                raise RuntimeError("Сертификат Let's Encrypt для домена панели не найден.")
+            current = str(_mtproto_web_section(cfg_text).get("domain") or "").strip().strip('"')
+            current_host = _mtproto_web_host(current)
+            if current_host and current_host != host:
+                raise RuntimeError(
+                    f"WEB-прокси уже привязан к {current}. Смена домена обнуляет выданные ссылки. "
+                    "Сначала выключите WEB-прокси."
+                )
+            domain = current if current_host == host and current else host
+            self._ensure_mtbuddy_web_support()
+            staged = _upsert_toml_section_values(
+                _read_text(cfg_path, ""),
+                "web",
+                {
+                    "enabled": "true",
+                    "only": "false",
+                    "domain": f'"{domain}"',
+                    "mode": '"mask"',
+                },
+            )
+            staged = _upsert_mtproto_censorship_cfg(staged, "", _MTPROTO_WEB_MASK_PORT)
+            self._write_mtproto_cfg(cfg_path, staged)
+            rc, out = self._run_mtbuddy(["setup", "masking"], 150)
+            masking_site = Path("/etc/nginx/sites-enabled/mtproto-masking")
+            if rc != 0 or not masking_site.exists():
+                self._run_mtbuddy(["setup", "web", "--remove"], 60)
+                try:
+                    self._restore_mtproto_mask_port(cfg_path)
+                except Exception:
+                    pass
+                raise RuntimeError(out or "mtbuddy setup masking не выполнен")
+            rc, out = self._run_mtbuddy(
+                [
+                    "setup",
+                    "web",
+                    "--domain",
+                    domain,
+                    "--mode",
+                    "mask",
+                    "--no-only",
+                    "--cert",
+                    cert,
+                    "--key",
+                    key,
+                ],
+                180,
+            )
+            relay_unit = Path("/etc/systemd/system/mtproto-web-relay.service")
+            web_site = Path("/etc/nginx/sites-enabled/mtproto-web")
+            if (
+                rc != 0
+                or not relay_unit.is_file()
+                or not web_site.exists()
+                or not _mtproto_web_is_on(_read_text(cfg_path, ""))
+            ):
+                self._run_mtbuddy(["setup", "web", "--remove"], 60)
+                try:
+                    self._restore_mtproto_mask_port(cfg_path)
+                except Exception:
+                    pass
+                raise RuntimeError(out or "mtbuddy setup web не выполнен")
+            if not (
+                self._service_is_active("mtproto-web-relay.service")
+                or self._service_is_active("mtproto-web-relay")
+            ):
+                _run(["systemctl", "enable", "--now", "mtproto-web-relay.service"], timeout=30.0)
+            return {"ok": True, "enabled": True, "domain": domain}
+
     def _unit_state(self, unit_name: str) -> dict:
         name = str(unit_name or "").strip()
         if not name:
@@ -3728,8 +3987,14 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             link_port = int(server_sec.get("public_port") or server_sec.get("port", 443) or 443)
         except Exception:
             link_port = 443
+        web_sec = _mtproto_web_section(cfg_text)
+        web_on = bool(web_sec.get("enabled"))
+        web_host = _mtproto_web_host(str(web_sec.get("domain") or ""))
+        web_available, web_reason, web_panel_host = _mtproto_web_availability()
         links_by_user: dict[str, str] = {}
         links_tme_by_user: dict[str, str] = {}
+        links_web_by_user: dict[str, str] = {}
+        links_web_tme_by_user: dict[str, str] = {}
         links_raw: list[str] = []
         if cfg_text and link_host:
             for u, sec in users.items():
@@ -3740,6 +4005,12 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     links_raw.append(f"{u}:")
                     links_raw.append(f"  tg: {tg}")
                     links_raw.append(f"  t.me: {tme}")
+                if web_on and web_host:
+                    web_tg, web_tme = _build_mtproto_web_links(web_host, sec)
+                    if web_tg:
+                        links_web_by_user[u] = web_tg
+                        links_web_tme_by_user[u] = web_tme
+                        links_raw.append(f"  web: {web_tg}")
 
         # Parse latest session counters from mtproto-proxy logs:
         # users_total=3 unassigned=2 users{alice=1,bob=0}
@@ -3797,6 +4068,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "secret": sec,
                     "link": links_by_user.get(u, ""),
                     "link_tme": links_tme_by_user.get(u, ""),
+                    "link_web": links_web_by_user.get(u, ""),
+                    "link_web_tme": links_web_tme_by_user.get(u, ""),
                     "enabled": True,
                     "sessions": int(sessions_by_user.get(u, 0)),
                 }
@@ -3810,6 +4083,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "secret": sec,
                     "link": "",
                     "link_tme": "",
+                    "link_web": "",
+                    "link_web_tme": "",
                     "enabled": False,
                     "sessions": int(sessions_by_user.get(u, 0)),
                 }
@@ -3986,6 +4261,15 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                     "nginx": nginx_state,
                     "health_timer": timer_state,
                     "mask_port_open_local": masking_ok,
+                },
+                "web": {
+                    "available": web_available,
+                    "unavailable_reason": web_reason,
+                    "enabled": web_on,
+                    "domain": web_host or web_panel_host,
+                    "only": bool(web_sec.get("only")),
+                    "relay_active": self._service_is_active("mtproto-web-relay.service")
+                    or self._service_is_active("mtproto-web-relay"),
                 },
             },
         )
@@ -4409,6 +4693,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
                 return self._send_text(400, "mtproto config missing")
             res = self._sync_mtproto_derived_config(persist_outbound_mode=mode, apply_upstream=True)
             return self._send_json(200, res)
+
+        if sp == "/api/mtproto/web":
+            if self._auth_enabled and not self._session_user():
+                return self._send_text(401, "Unauthorized")
+            body = self._read_json_body()
+            if "enabled" not in body:
+                return self._send_text(400, "enabled required")
+            try:
+                return self._send_json(200, self._op_mtproto_web_set(bool(body.get("enabled"))))
+            except Exception as ex:
+                return self._send_text(500, str(ex))
 
         if sp == "/api/mtproto/install":
             if self._auth_enabled and not self._session_user():
