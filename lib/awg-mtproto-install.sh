@@ -335,6 +335,16 @@ PY
   run_mtbuddy_clean setup masking || log "warning: mtbuddy setup masking failed"
   run_mtbuddy_clean setup web --domain "$web_domain" --mode mask --no-only --cert "$cert" --key "$key" \
     || log "warning: mtbuddy setup web failed"
+  python3 - <<'PY' || log "warning: panel front on the WEB domain was not applied"
+import importlib.util
+from pathlib import Path
+site = Path("/opt/awg-uplink/webui/server.py")
+spec = importlib.util.spec_from_file_location("awg_webui_server", site)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+cfg = Path("/opt/mtproto-proxy/config.toml").read_text(encoding="utf-8")
+mod._patch_mtproto_web_vhost_for_panel(cfg)
+PY
 }
 
 restart_mtproto_service() {

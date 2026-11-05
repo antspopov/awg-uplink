@@ -1218,6 +1218,71 @@ def _mtproto_web_status_snapshot() -> dict:
         return dict(_MTPROTO_WEB_STATUS)
 
 
+def _patch_mtproto_web_vhost_for_panel(cfg_text: str = "") -> None:
+    """Keep the panel on the WEB domain. Only the Telegram bridge and its socket go to the relay."""
+    path = Path("/etc/nginx/sites-available/mtproto-web")
+    if not path.is_file():
+        raise RuntimeError("vhost WEB-прокси не найден")
+    original = path.read_text(encoding="utf-8")
+    web = _mtproto_web_section(cfg_text) if cfg_text else {}
+    relay_port = str(web.get("port") or "8081").strip() or "8081"
+    ws_path = str(web.get("ws_path") or "/api/v1/socket").strip() or "/api/v1/socket"
+    if not ws_path.startswith("/"):
+        ws_path = "/" + ws_path
+    panel_port = str(os.environ.get("AWG_WEBUI_PORT", "") or "8080").strip() or "8080"
+    panel = f"127.0.0.1:{panel_port}"
+    relay = f"127.0.0.1:{relay_port}"
+    maps = (
+        "# awg-uplink-panel-front\n"
+        "map $arg_bridge $awg_web_is_bridge {\n"
+        '    ""      0;\n'
+        "    default 1;\n"
+        "}\n"
+        "map $arg_b $awg_web_is_b {\n"
+        '    ""      0;\n'
+        "    default 1;\n"
+        "}\n"
+        "map $uri $awg_web_is_ws {\n"
+        "    default 0;\n"
+        f"    {ws_path} 1;\n"
+        "}\n"
+        'map "$awg_web_is_bridge$awg_web_is_b$awg_web_is_ws" $awg_upstream {\n'
+        f"    default http://{panel};\n"
+        f"    ~1      http://{relay};\n"
+        "}\n\n"
+    )
+    text = original
+    if "awg-uplink-panel-front" not in text:
+        text = maps + text
+    text, n = re.subn(
+        r"proxy_pass\s+http://127\.0\.0\.1:\d+\s*;",
+        "proxy_pass $awg_upstream;",
+        text,
+        count=1,
+    )
+    if n != 1 or "proxy_pass $awg_upstream;" not in text:
+        raise RuntimeError("не удалось направить обычные заходы домена на панель")
+    if "client_max_body_size" not in text:
+        text = text.replace(
+            "ssl_session_cache shared:MTPROTOWEB:2m;",
+            "ssl_session_cache shared:MTPROTOWEB:2m;\n    client_max_body_size 0;",
+            1,
+        )
+    if text == original:
+        return
+    path.write_text(text, encoding="utf-8")
+    rc, out, err = _run(["nginx", "-t"], timeout=20.0)
+    if rc != 0:
+        path.write_text(original, encoding="utf-8")
+        raise RuntimeError((err or out or "nginx -t failed").strip())
+    rc, out, err = _run(["systemctl", "reload", "nginx"], timeout=20.0)
+    if rc != 0:
+        path.write_text(original, encoding="utf-8")
+        _run(["nginx", "-t"], timeout=20.0)
+        _run(["systemctl", "reload", "nginx"], timeout=20.0)
+        raise RuntimeError((err or out or "nginx reload failed").strip())
+
+
 def _mtproto_web_status_fail(message: str) -> None:
     text = (message or "не удалось переключить WEB-прокси").strip()
     short = text.splitlines()[0][:180]
@@ -4017,6 +4082,17 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         ):
             _mtproto_web_status_update(phase="start", message="Запускаем сервис релея…")
             _run(["systemctl", "enable", "--now", "mtproto-web-relay.service"], timeout=30.0)
+        _mtproto_web_status_update(phase="panel", message="Оставляем панель на этом домене…")
+        try:
+            _patch_mtproto_web_vhost_for_panel(_read_text(cfg_path, ""))
+        except Exception:
+            _mtproto_web_status_update(phase="rollback", message="Не получилось. Откатываем изменения…")
+            self._run_mtbuddy(["setup", "web", "--remove"], 60)
+            try:
+                self._restore_mtproto_mask_port(cfg_path)
+            except Exception:
+                pass
+            raise
         return {"ok": True, "enabled": True, "domain": domain}
 
     def _unit_state(self, unit_name: str) -> dict:

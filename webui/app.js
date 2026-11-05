@@ -1394,7 +1394,7 @@ function paintMtprotoWebControl(web, cfgOk) {
   if (outbound) outbound.disabled = !cfgOk || busy;
   if (webHelp && !busy) {
     webHelp.textContent = info.available
-      ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Телефонные ссылки tg:// остаются. Домен в ссылке — домен панели; его смена обнуляет уже выданные WEB-ссылки."
+        ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Обычный заход на домен открывает эту панель. Мост Telegram (/?bridge=) остаётся у релея. Смена домена обнуляет уже выданные WEB-ссылки."
       : String(info.unavailable_reason || "");
   }
   if (document.getElementById("mtpWebStatus")) {
@@ -2091,14 +2091,6 @@ function initMtprotoPanel(state) {
         );
         if (!ok) {
           webToggle.checked = true;
-          return;
-        }
-      } else {
-        const ok = window.confirm(
-          "Включить WEB-прокси? Обычный адрес панели без порта начнёт открывать страницу маскировки Telegram, а не панель. Панель останется на порту 5000."
-        );
-        if (!ok) {
-          webToggle.checked = false;
           return;
         }
       }
