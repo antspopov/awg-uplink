@@ -1268,16 +1268,33 @@ def _patch_mtproto_web_vhost_for_panel(cfg_text: str = "") -> None:
             "ssl_session_cache shared:MTPROTOWEB:2m;\n    client_max_body_size 0;",
             1,
         )
-    if text == original:
+    domain = _mtproto_web_host(str(web.get("domain") or ""))
+    mask_path = Path("/etc/nginx/sites-available/mtproto-masking")
+    mask_original = mask_path.read_text(encoding="utf-8") if mask_path.is_file() else ""
+    mask_text = mask_original
+    if domain and mask_original:
+        mask_text = re.sub(
+            rf"(?m)^(\s*)server_name\s+{re.escape(domain)}\s*;",
+            r"\1server_name _;",
+            mask_original,
+            count=1,
+        )
+    if text == original and mask_text == mask_original:
         return
     path.write_text(text, encoding="utf-8")
+    if mask_path.is_file() and mask_text != mask_original:
+        mask_path.write_text(mask_text, encoding="utf-8")
     rc, out, err = _run(["nginx", "-t"], timeout=20.0)
     if rc != 0:
         path.write_text(original, encoding="utf-8")
+        if mask_path.is_file():
+            mask_path.write_text(mask_original, encoding="utf-8")
         raise RuntimeError((err or out or "nginx -t failed").strip())
     rc, out, err = _run(["systemctl", "reload", "nginx"], timeout=20.0)
     if rc != 0:
         path.write_text(original, encoding="utf-8")
+        if mask_path.is_file():
+            mask_path.write_text(mask_original, encoding="utf-8")
         _run(["nginx", "-t"], timeout=20.0)
         _run(["systemctl", "reload", "nginx"], timeout=20.0)
         raise RuntimeError((err or out or "nginx reload failed").strip())
