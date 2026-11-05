@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AWG Split Gate — управление</title>
     <base id="baseTag" href="./" />
-    <link rel="stylesheet" href="./styles.css?v=20261105-3" />
+    <link rel="stylesheet" href="./styles.css?v=20260509-17" />
   </head>
   <body>
     <div class="app">
@@ -749,23 +749,6 @@
               </div>
             </div>
             <div class="mtp-config-extras">
-              <div class="field mtp-web-row" id="mtpWebRow">
-                <div class="dns-amnezia-watch-row">
-                  <label class="dns-amnezia-watch-text" for="mtpWebToggle">
-                    WEB-прокси (Telegram Desktop 7.1+)
-                  </label>
-                  <label class="toggle-switch" id="mtpWebSwitch">
-                    <input type="checkbox" id="mtpWebToggle" role="switch" />
-                    <span class="toggle-switch-slider" aria-hidden="true"></span>
-                  </label>
-                </div>
-                <div class="status mtp-web-status" id="mtpWebStatus">
-                  <span class="mtp-web-spinner hidden" id="mtpWebSpinner" aria-hidden="true"></span>
-                  <span class="dot dot--unknown"></span>
-                  <span class="status-text">—</span>
-                </div>
-                <div class="help" id="mtpWebHelp"></div>
-              </div>
               <div class="row">
                 <div class="field">
                   <label>Исходящий интерфейс</label>
@@ -924,8 +907,7 @@
             После «Сохранить» синхронизация Web UI может заново записать некоторые поля:
             секция <code>[upstream]</code> (режим исходящего интерфейса),
             в <code>[censorship]</code> — <code>mask</code>, <code>mask_port</code>, при заданном домене окружения —
-            <code>tls_domain</code>, в <code>[server]</code> — производные IP. Пока включён WEB-прокси,
-            <code>mask_port</code> остаётся <code>8443</code>. Поле <code>drs</code> сохраняется как у вас
+            <code>tls_domain</code>, в <code>[server]</code> — производные IP. Поле <code>drs</code> сохраняется как у вас
             в тексте (по умолчанию включается при установке только если строки не было).
           </p>
           <textarea id="mtpConfigText" rows="16" placeholder="[server]&#10;..."></textarea>
@@ -1041,7 +1023,7 @@
     </div>
 
     <script src="./config.js"></script>
-    <script src="./app.js?v=20261105-2"></script>
+    <script src="./app.js?v=20260509-17"></script>
   </body>
 </html>
 

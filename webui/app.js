@@ -1326,7 +1326,6 @@ function renderMtprotoUsers(users, pendingToggles = {}) {
     const row = document.createElement("div");
     row.className = "mtp-user-item";
     const link = u.link || "";
-    const linkWeb = u.link_web || "";
     const pending = pendingToggles && pendingToggles[u.username || ""];
     const baseEnabled = Boolean(u.enabled);
     const enabled = pending ? Boolean(pending.enabled) : baseEnabled;
@@ -1340,79 +1339,19 @@ function renderMtprotoUsers(users, pendingToggles = {}) {
         <div class="mtp-user-meta">secret: ${shortSecret(u.secret || "")}</div>
       </div>
       <div class="mtp-user-sessions">${sessions}</div>
-      <div class="mtp-user-link" title="${link}">
-        <div>${link || "tg://—"}</div>
-        ${linkWeb ? `<div class="mtp-user-link-web" title="${linkWeb}">${linkWeb}</div>` : ""}
-      </div>
+      <div class="mtp-user-link" title="${link}">${link || "tg://—"}</div>
       <div class="mtp-user-actions">
         <button class="mini-btn user-action" data-copy-link="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy tg://</button>
         <button class="mini-btn user-action" data-copy-tme="${u.username || ""}" type="button" ${link ? "" : "disabled"}>Copy t.me</button>
-        ${linkWeb ? `<button class="mini-btn user-action" data-copy-web="${u.username || ""}" type="button">Copy WEB</button>` : ""}
         <button class="mini-btn user-action" data-edit-user="${u.username || ""}" type="button">✎</button>
         <button class="mini-btn mini-btn--danger user-action" data-del-user="${u.username || ""}" type="button" ${lastActiveLock ? "disabled" : ""} title="${lastActiveLock ? "Нельзя удалить последнего активного пользователя" : "Удалить"}">✕</button>
       </div>
     `;
     row.dataset.link = link;
     row.dataset.linkTme = linkTme;
-    row.dataset.linkWeb = linkWeb;
-    row.dataset.linkWebTme = u.link_web_tme || "";
     row.dataset.secret = u.secret || "";
     row.dataset.sessions = String(sessions);
     body.appendChild(row);
-  }
-}
-
-let mtpWebUiBusy = false;
-let mtpWebUiTarget = false;
-let mtpWebUiMessage = "";
-let mtpWebUiToken = 0;
-
-function paintMtprotoWebControl(web, cfgOk) {
-  const info = web || {};
-  const row = document.getElementById("mtpWebRow");
-  const webToggle = document.getElementById("mtpWebToggle");
-  const webHelp = document.getElementById("mtpWebHelp");
-  const spinner = document.getElementById("mtpWebSpinner");
-  const outbound = document.getElementById("mtpOutboundMode");
-  const busy = mtpWebUiBusy || Boolean(info.busy);
-  const message = busy ? String(info.phase_message || mtpWebUiMessage || "Выполняется…") : "";
-  if (row) {
-    row.classList.toggle("is-busy", busy);
-    if (busy) row.setAttribute("aria-busy", "true");
-    else row.removeAttribute("aria-busy");
-  }
-  if (spinner) spinner.classList.toggle("hidden", !busy);
-  if (webToggle) {
-    if (busy) {
-      webToggle.checked = mtpWebUiBusy ? mtpWebUiTarget : Boolean(info.target_enabled);
-      webToggle.disabled = true;
-    } else {
-      webToggle.checked = Boolean(info.enabled);
-      webToggle.disabled = !cfgOk || !info.available;
-    }
-  }
-  if (outbound) outbound.disabled = !cfgOk || busy;
-  if (webHelp && !busy) {
-    webHelp.textContent = info.available
-        ? "Ссылки tg://webproxy для Telegram Desktop 7.1+. Обычный заход на домен открывает эту панель. Мост Telegram (/?bridge=) остаётся у релея. Смена домена обнуляет уже выданные WEB-ссылки."
-      : String(info.unavailable_reason || "");
-  }
-  if (document.getElementById("mtpWebStatus")) {
-    if (busy) {
-      setStatusById("mtpWebStatus", "dot--warn", message);
-      const overlay = document.getElementById("busyOverlay");
-      if (overlay && !overlay.classList.contains("hidden") && message) setBusyOverlayText(message);
-    } else if (!info.available) {
-      setStatusById("mtpWebStatus", "dot--warn", "недоступен");
-    } else if (info.phase === "failed" && info.phase_message) {
-      setStatusById("mtpWebStatus", "dot--bad", info.phase_message);
-    } else if (info.enabled && info.relay_active) {
-      setStatusById("mtpWebStatus", "dot--ok", `включён · ${info.domain || ""}`.trim());
-    } else if (info.enabled) {
-      setStatusById("mtpWebStatus", "dot--bad", "включён, релей не активен");
-    } else {
-      setStatusById("mtpWebStatus", "dot--muted", "выключен");
-    }
   }
 }
 
@@ -1491,8 +1430,6 @@ async function refreshMtprotoState(state) {
     } else {
       setStatusById("mtprotoUsersStatus", "dot--ok", `загружено — ${ruUsersCount(n)}`);
     }
-
-    paintMtprotoWebControl(s.web || {}, cfgOk);
 
     setStatusById("mtpConfigStatus", s.config_exists ? "dot--ok" : "dot--warn", s.config_exists ? "загружен" : "не найден");
     const svc = s.service || {};
@@ -2081,73 +2018,6 @@ function initMtprotoPanel(state) {
     $("mtpConfigModalOverlay").classList.remove("hidden");
   });
 
-  const webToggle = $("mtpWebToggle");
-  if (webToggle) {
-    webToggle.addEventListener("change", async () => {
-      const enabled = Boolean(webToggle.checked);
-      if (!enabled) {
-        const ok = window.confirm(
-          "Выключить WEB-прокси? Уже выданные ссылки tg://webproxy перестанут работать. Ссылки tg:// для телефонов останутся."
-        );
-        if (!ok) {
-          webToggle.checked = true;
-          return;
-        }
-      }
-      const token = ++mtpWebUiToken;
-      mtpWebUiBusy = true;
-      mtpWebUiTarget = enabled;
-      mtpWebUiMessage = enabled ? "Включаем WEB-прокси…" : "Выключаем WEB-прокси…";
-      paintMtprotoWebControl(
-        { available: true, enabled, busy: true, phase_message: mtpWebUiMessage, target_enabled: enabled },
-        true
-      );
-      let stopPoll = false;
-      const poll = (async () => {
-        while (!stopPoll && mtpWebUiToken === token) {
-          await sleepMs(800);
-          if (stopPoll || mtpWebUiToken !== token) return;
-          try {
-            const res = await fetch(`${basePath()}api/mtproto/web/status`, {
-              credentials: "include",
-              cache: "no-store",
-            });
-            if (!res.ok || stopPoll || mtpWebUiToken !== token) continue;
-            const st = await res.json();
-            if (!st || !st.running || !st.message || stopPoll || mtpWebUiToken !== token || !mtpWebUiBusy) continue;
-            mtpWebUiMessage = String(st.message);
-            paintMtprotoWebControl(
-              {
-                available: true,
-                busy: true,
-                phase_message: mtpWebUiMessage,
-                target_enabled: Boolean(st.target_enabled),
-                enabled: Boolean(st.target_enabled),
-              },
-              true
-            );
-          } catch (_) {}
-        }
-      })();
-      try {
-        await withBusyOverlay(mtpWebUiMessage, async () => {
-          await postJson("/api/mtproto/web", { enabled });
-        });
-        toast(enabled ? "WEB-прокси включён." : "WEB-прокси выключен.", "ok", 2600);
-      } catch (e) {
-        toast(String(e?.message || "Не удалось переключить WEB-прокси").replace(/^"|"$/g, ""), "error", 5200);
-      } finally {
-        stopPoll = true;
-        if (mtpWebUiToken === token) {
-          mtpWebUiBusy = false;
-          mtpWebUiMessage = "";
-        }
-      }
-      await refreshMtprotoState(state);
-      void poll;
-    });
-  }
-
   const outboundSel = $("mtpOutboundMode");
   if (outboundSel) {
     outboundSel.addEventListener("change", async () => {
@@ -2225,7 +2095,6 @@ function initMtprotoPanel(state) {
     const toggleUser = t.getAttribute("data-toggle-user");
     const copyUser = t.getAttribute("data-copy-link");
     const copyTmeUser = t.getAttribute("data-copy-tme");
-    const copyWebUser = t.getAttribute("data-copy-web");
     const editUser = t.getAttribute("data-edit-user");
     if (uname) {
       const ok = await openDeleteConfirm(uname);
@@ -2283,14 +2152,6 @@ function initMtprotoPanel(state) {
         const ok = await copyText(linkTme || tgToTme(link));
         toast(ok ? "Ссылка t.me скопирована." : "Не удалось скопировать ссылку.", ok ? "ok" : "error");
       }
-      return;
-    }
-    if (copyWebUser) {
-      const card = t.closest(".mtp-user-item");
-      const linkWeb = card ? card.dataset.linkWeb || "" : "";
-      if (!linkWeb) return;
-      const ok = await copyText(linkWeb);
-      toast(ok ? "Ссылка tg://webproxy скопирована." : "Не удалось скопировать ссылку.", ok ? "ok" : "error");
       return;
     }
     if (editUser) {

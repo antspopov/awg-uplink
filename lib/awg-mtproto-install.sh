@@ -289,64 +289,6 @@ enable_mtproto_recovery() {
   fi
 }
 
-config_web_enabled() {
-  [[ -f "$MTPROTO_CONFIG" ]] || return 1
-  python3 - "$MTPROTO_CONFIG" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-p = Path(sys.argv[1])
-try:
-    data = tomllib.loads(p.read_text(encoding="utf-8"))
-except Exception:
-    raise SystemExit(1)
-web = data.get("web")
-if isinstance(web, dict) and web.get("enabled") is True:
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
-reapply_mtproto_web() {
-  local domain="$1"
-  local web_domain cert key
-  web_domain="$(python3 - "$MTPROTO_CONFIG" "$domain" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-p = Path(sys.argv[1])
-fallback = sys.argv[2].strip()
-try:
-    data = tomllib.loads(p.read_text(encoding="utf-8"))
-except Exception:
-    data = {}
-web = data.get("web") if isinstance(data.get("web"), dict) else {}
-raw = str(web.get("domain") or "").strip().strip('"')
-print(raw or fallback)
-PY
-)"
-  cert="/etc/letsencrypt/live/${web_domain}/fullchain.pem"
-  key="/etc/letsencrypt/live/${web_domain}/privkey.pem"
-  if [[ ! -f "$cert" || ! -f "$key" ]]; then
-    log "warning: WEB proxy left enabled but Let's Encrypt files for ${web_domain} are missing"
-    return 0
-  fi
-  log "Reapplying WEB proxy (masking on 127.0.0.1:8443, relay domain ${web_domain})..."
-  run_mtbuddy_clean setup masking || log "warning: mtbuddy setup masking failed"
-  run_mtbuddy_clean setup web --domain "$web_domain" --mode mask --no-only --cert "$cert" --key "$key" \
-    || log "warning: mtbuddy setup web failed"
-  python3 - <<'PY' || log "warning: panel front on the WEB domain was not applied"
-import importlib.util
-from pathlib import Path
-site = Path("/opt/awg-uplink/webui/server.py")
-spec = importlib.util.spec_from_file_location("awg_webui_server", site)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-cfg = Path("/opt/mtproto-proxy/config.toml").read_text(encoding="utf-8")
-mod._patch_mtproto_web_vhost_for_panel(cfg)
-PY
-}
-
 restart_mtproto_service() {
   # Full restart is required after install:
   # - systemd capability drop-ins (CAP_NET_ADMIN/SO_MARK) are applied only on restart
@@ -377,17 +319,8 @@ main() {
   enable_mtproto_dashboard
   # Some mtbuddy setup subcommands can rewrite config.toml sections.
   # Re-apply censorship keys at the very end to force local masking target.
-  # WEB-прокси mtbuddy обслуживает только с mask_port 8443; панель остаётся на своём порту.
-  MASK_PORT="$(read_env_value AWG_UI_MASK_PORT)"
-  MASK_PORT="${MASK_PORT:-5000}"
-  if config_web_enabled; then
-    MASK_PORT=8443
-  fi
   upsert_censorship_config "$domain"
   validate_or_repair_mtproto_toml
-  if config_web_enabled; then
-    reapply_mtproto_web "$domain"
-  fi
   if [[ "$MTPROTO_MASK_PORT_ADDED" == "1" ]]; then
     log "Restarting mtproto-proxy due to newly added mask_port..."
   fi

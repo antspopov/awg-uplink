@@ -824,50 +824,6 @@ body::before {
   margin-top: 8px;
 }
 
-.mtp-web-row {
-  margin-bottom: 20px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--border);
-}
-
-.mtp-web-status {
-  margin-top: 8px;
-}
-
-.mtp-web-status .status-text {
-  line-height: 1.35;
-}
-
-.mtp-web-spinner {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.22);
-  border-top-color: var(--accent);
-  animation: busy-spin 0.9s linear infinite;
-  flex-shrink: 0;
-}
-
-.mtp-web-row.is-busy .mtp-web-status .dot {
-  display: none;
-}
-
-.mtp-web-row.is-busy .toggle-switch input:disabled + .toggle-switch-slider {
-  opacity: 1;
-  cursor: progress;
-  animation: mtp-web-pulse 1.15s ease-in-out infinite;
-}
-
-@keyframes mtp-web-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
-  }
-  50% {
-    box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.28);
-  }
-}
-
 .geo-routing-settings-card {
   margin-top: 18px;
 }
@@ -1477,7 +1433,7 @@ select:disabled option {
 
 .mtp-user-item {
   display: grid;
-  grid-template-columns: 44px minmax(0, 0.8fr) max-content minmax(0, 1fr) max-content;
+  grid-template-columns: 44px minmax(120px, 1fr) 56px minmax(220px, 1fr) minmax(300px, 340px);
   gap: 8px;
   align-items: center;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -1675,26 +1631,14 @@ select:disabled option {
 .mtp-user-link {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.82);
-  min-width: 0;
-  overflow: hidden;
-}
-
-.mtp-user-link > div {
-  display: block;
-  max-width: 100%;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mtp-user-link-web {
-  margin-top: 4px;
-  color: rgba(255, 255, 255, 0.62);
 }
 
 .mtp-user-actions {
   display: grid;
-  grid-template-columns: repeat(5, max-content);
+  grid-template-columns: repeat(4, max-content);
   gap: 6px;
   width: max-content;
   max-width: 100%;
@@ -1923,7 +1867,6 @@ select:disabled option {
 
 .busy-text {
   font-size: 13px;
-  line-height: 1.4;
   color: rgba(255, 255, 255, 0.92);
 }
 
@@ -2147,14 +2090,12 @@ textarea {
 
 /* Final authoritative layout for MTProto user action buttons */
 .mtp-user-actions {
-  display: flex !important;
-  flex-wrap: nowrap;
-  align-items: center;
-  justify-content: flex-end;
+  display: grid !important;
+  grid-template-columns: repeat(4, max-content) !important;
   gap: 6px !important;
   width: max-content !important;
-  max-width: none !important;
-  min-width: max-content;
+  max-width: 100% !important;
+  justify-content: end !important;
 }
 
 .mtp-user-actions .mini-btn,
