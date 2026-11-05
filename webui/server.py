@@ -3836,7 +3836,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         except Exception as ex:
             return str(ex)
 
-    def _run_mtbuddy(self, args: list[str], timeout: float) -> tuple[int, str]:
+    def _run_mtbuddy(self, args: list[str], timeout: float, *, full: bool = False) -> tuple[int, str]:
         if not shutil.which("mtbuddy"):
             return 127, "mtbuddy не установлен. Сначала установите MTProto."
         env = {
@@ -3857,20 +3857,25 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             return 124, "mtbuddy не ответил вовремя"
         text = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
         lines = [ln for ln in text.splitlines() if ln.strip()]
+        if full:
+            return proc.returncode, "\n".join(lines)
         return proc.returncode, "\n".join(lines[-12:])
 
-    def _mtbuddy_supports_web(self) -> bool:
-        _rc, text = self._run_mtbuddy(["--help"], 20)
+    def _mtbuddy_version(self) -> str:
+        _rc, ver_text = self._run_mtbuddy(["--version"], 20, full=True)
+        match = re.search(r"(\d+\.\d+\.\d+)", ver_text or "")
+        return match.group(1) if match else ""
+
+    def _mtbuddy_web_ready(self) -> bool:
+        version = self._mtbuddy_version()
+        if version and not _semver_gt(_MTPROTO_WEB_MIN_VERSION, version):
+            return True
+        _rc, text = self._run_mtbuddy(["--help"], 20, full=True)
         return "setup web" in (text or "").lower()
 
     def _ensure_mtbuddy_web_support(self) -> None:
         _mtproto_web_status_update(phase="check", message="Проверяем версию mtbuddy…")
-        _rc, ver_text = self._run_mtbuddy(["--version"], 20)
-        match = re.search(r"(\d+\.\d+\.\d+)", ver_text or "")
-        version = match.group(1) if match else ""
-        if version and not _semver_gt(_MTPROTO_WEB_MIN_VERSION, version):
-            return
-        if self._mtbuddy_supports_web():
+        if self._mtbuddy_web_ready():
             return
         _mtproto_web_status_update(
             phase="update",
@@ -3879,7 +3884,8 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         rc, out = self._run_mtbuddy(["update"], 150)
         if rc != 0:
             raise RuntimeError(out or "не удалось обновить mtbuddy до версии с WEB-прокси")
-        if not self._mtbuddy_supports_web():
+        _mtproto_web_status_update(phase="check", message="Обновление mtbuddy готово, продолжаем…")
+        if not self._mtbuddy_web_ready():
             raise RuntimeError("после обновления mtbuddy команда setup web недоступна")
 
     def _write_mtproto_cfg(self, cfg_path: str, text: str) -> None:
