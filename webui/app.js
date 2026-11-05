@@ -2093,6 +2093,14 @@ function initMtprotoPanel(state) {
           webToggle.checked = true;
           return;
         }
+      } else {
+        const ok = window.confirm(
+          "Включить WEB-прокси? Обычный адрес панели без порта начнёт открывать страницу маскировки Telegram, а не панель. Панель останется на порту 5000."
+        );
+        if (!ok) {
+          webToggle.checked = false;
+          return;
+        }
       }
       const token = ++mtpWebUiToken;
       mtpWebUiBusy = true;
